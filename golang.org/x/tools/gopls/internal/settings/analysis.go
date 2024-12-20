@@ -108,7 +108,7 @@ var DefaultAnalyzers = make(map[string]*Analyzer) // initialized below
 
 func init() {
 	// The traditional vet suite:
-	analyzers := []*Analyzer{
+	analyzers := addCustomAnalyzers([]*Analyzer{
 		// The traditional vet suite:
 		{analyzer: appends.Analyzer, enabled: true},
 		{analyzer: asmdecl.Analyzer, enabled: true},
@@ -184,7 +184,7 @@ func init() {
 		// greyed out, (due to the 'deletions only' fix). That seems like a nice UI
 		// feature.
 		{analyzer: unusedvariable.Analyzer, enabled: false},
-	}
+	})
 	for _, analyzer := range analyzers {
 		DefaultAnalyzers[analyzer.analyzer.Name] = analyzer
 	}

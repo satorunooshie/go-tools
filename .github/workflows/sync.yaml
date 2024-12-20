@@ -1,0 +1,25 @@
+name: Sync
+
+on:
+  workflow_dispatch:
+  schedule: # JST 7:30 AM
+    - cron: '30 22 * * *'
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          check-latest: true
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: golang.org/x/tools/go.sum
+      - run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+      - run: make sync
+      - run: git push origin HEAD
