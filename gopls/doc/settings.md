@@ -184,13 +184,12 @@ Example Usage:
 ...
   "codelenses": {
     "generate": false,  // Don't show the `go generate` lens.
-    "gc_details": true  // Show a code lens toggling the display of gc's choices.
   }
 ...
 }
 ```
 
-Default: `{"gc_details":false,"generate":true,"regenerate_cgo":true,"run_govulncheck":false,"tidy":true,"upgrade_dependency":true,"vendor":true}`.
+Default: `{"generate":true,"regenerate_cgo":true,"run_govulncheck":false,"tidy":true,"upgrade_dependency":true,"vendor":true}`.
 
 <a id='semanticTokens'></a>
 ### `semanticTokens bool`
@@ -315,23 +314,6 @@ These analyses are documented on
 [Staticcheck's website](https://staticcheck.io/docs/checks/).
 
 Default: `false`.
-
-<a id='annotations'></a>
-### `annotations map[enum]bool`
-
-**This setting is experimental and may be deleted.**
-
-annotations specifies the various kinds of optimization diagnostics
-that should be reported by the gc_details command.
-
-Each enum must be one of:
-
-* `"bounds"` controls bounds checking diagnostics.
-* `"escape"` controls diagnostics about escape choices.
-* `"inline"` controls diagnostics about inlining choices.
-* `"nil"` controls nil checks.
-
-Default: `{"bounds":true,"escape":true,"inline":true,"nil":true}`.
 
 <a id='vulncheck'></a>
 ### `vulncheck enum`

@@ -441,6 +441,11 @@
 							"Default": "true"
 						},
 						{
+							"Name": "\"hostport\"",
+							"Doc": "check format of addresses passed to net.Dial\n\nThis analyzer flags code that produce network address strings using\nfmt.Sprintf, as in this example:\n\n    addr := fmt.Sprintf(\"%s:%d\", host, 12345) // \"will not work with IPv6\"\n    ...\n    conn, err := net.Dial(\"tcp\", addr)       // \"when passed to dial here\"\n\nThe analyzer suggests a fix to use the correct approach, a call to\nnet.JoinHostPort:\n\n    addr := net.JoinHostPort(host, \"12345\")\n    ...\n    conn, err := net.Dial(\"tcp\", addr)\n\nA similar diagnostic and fix are produced for a format string of \"%s:%s\".\n",
+							"Default": "true"
+						},
+						{
 							"Name": "\"httpresponse\"",
 							"Doc": "check for mistakes using HTTP responses\n\nA common mistake when using the net/http package is to defer a function\ncall to close the http.Response Body before checking the error that\ndetermines whether the response is valid:\n\n\tresp, err := http.Head(url)\n\tdefer resp.Body.Close()\n\tif err != nil {\n\t\tlog.Fatal(err)\n\t}\n\t// (defer statement belongs here)\n\nThis checker helps uncover latent nil dereference bugs by reporting a\ndiagnostic for such mistakes.",
 							"Default": "true"
@@ -463,6 +468,11 @@
 						{
 							"Name": "\"lostcancel\"",
 							"Doc": "check cancel func returned by context.WithCancel is called\n\nThe cancellation function returned by context.WithCancel, WithTimeout,\nWithDeadline and variants such as WithCancelCause must be called,\nor the new context will remain live until its parent context is cancelled.\n(The background context is never cancelled.)",
+							"Default": "true"
+						},
+						{
+							"Name": "\"modernize\"",
+							"Doc": "simplify code by using modern constructs\n\nThis analyzer reports opportunities for simplifying and clarifying\nexisting code by using more modern features of Go, such as:\n\n  - replacing an if/else conditional assignment by a call to the\n    built-in min or max functions added in go1.21;\n  - replacing sort.Slice(x, func(i, j int) bool) { return s[i] \u003c s[j] }\n    by a call to slices.Sort(s), added in go1.21;\n  - replacing interface{} by the 'any' type added in go1.18;\n  - replacing append([]T(nil), s...) by slices.Clone(s) or\n    slices.Concat(s), added in go1.21;\n  - replacing a loop around an m[k]=v map update by a call\n    to one of the Collect, Copy, Clone, or Insert functions\n    from the maps package, added in go1.21;\n  - replacing []byte(fmt.Sprintf...) by fmt.Appendf(nil, ...),\n    added in go1.19;\n  - replacing uses of context.WithCancel in tests with t.Context, added in\n    go1.24;",
 							"Default": "true"
 						},
 						{
@@ -581,6 +591,11 @@
 							"Default": "true"
 						},
 						{
+							"Name": "\"unusedfunc\"",
+							"Doc": "check for unused functions and methods\n\nThe unusedfunc analyzer reports functions and methods that are\nnever referenced outside of their own declaration.\n\nA function is considered unused if it is unexported and not\nreferenced (except within its own declaration).\n\nA method is considered unused if it is unexported, not referenced\n(except within its own declaration), and its name does not match\nthat of any method of an interface type declared within the same\npackage.\n\nThe tool may report a false positive for a declaration of an\nunexported function that is referenced from another package using\nthe go:linkname mechanism, if the declaration's doc comment does\nnot also have a go:linkname comment. (Such code is in any case\nstrongly discouraged: linkname annotations, if they must be used at\nall, should be used on both the declaration and the alias.)\n\nThe unusedfunc algorithm is not as precise as the\ngolang.org/x/tools/cmd/deadcode tool, but it has the advantage that\nit runs within the modular analysis framework, enabling near\nreal-time feedback within gopls.",
+							"Default": "true"
+						},
+						{
 							"Name": "\"unusedparams\"",
 							"Doc": "check for unused parameters of functions\n\nThe unusedparams analyzer checks functions to see if there are\nany parameters that are not being used.\n\nTo ensure soundness, it ignores:\n  - \"address-taken\" functions, that is, functions that are used as\n    a value rather than being called directly; their signatures may\n    be required to conform to a func type.\n  - exported functions or methods, since they may be address-taken\n    in another package.\n  - unexported methods whose name matches an interface method\n    declared in the same package, since the method's signature\n    may be required to conform to the interface type.\n  - functions with empty bodies, or containing just a call to panic.\n  - parameters that are unnamed, or named \"_\", the blank identifier.\n\nThe analyzer suggests a fix of replacing the parameter name by \"_\",\nbut in such cases a deeper fix can be obtained by invoking the\n\"Refactor: remove unused parameter\" code action, which will\neliminate the parameter entirely, along with all corresponding\narguments at call sites, while taking care to preserve any side\neffects in the argument expressions; see\nhttps://github.com/golang/tools/releases/tag/gopls%2Fv0.14.",
 							"Default": "true"
@@ -593,17 +608,12 @@
 						{
 							"Name": "\"unusedvariable\"",
 							"Doc": "check for unused variables and suggest fixes",
-							"Default": "false"
+							"Default": "true"
 						},
 						{
 							"Name": "\"unusedwrite\"",
 							"Doc": "checks for unused writes\n\nThe analyzer reports instances of writes to struct fields and\narrays that are never read. Specifically, when a struct object\nor an array is copied, its elements are copied implicitly by\nthe compiler, and any element write to this copy does nothing\nwith the original object.\n\nFor example:\n\n\ttype T struct { x int }\n\n\tfunc f(input []T) {\n\t\tfor i, v := range input {  // v is a copy\n\t\t\tv.x = i  // unused write to field x\n\t\t}\n\t}\n\nAnother example is about non-pointer receiver:\n\n\ttype T struct { x int }\n\n\tfunc (t T) f() {  // t is a copy\n\t\tt.x = i  // unused write to field x\n\t}",
 							"Default": "true"
-						},
-						{
-							"Name": "\"useany\"",
-							"Doc": "check for constraints that could be simplified to \"any\"",
-							"Default": "false"
 						},
 						{
 							"Name": "\"waitgroup\"",
@@ -632,40 +642,6 @@
 				},
 				"EnumValues": null,
 				"Default": "false",
-				"Status": "experimental",
-				"Hierarchy": "ui.diagnostic"
-			},
-			{
-				"Name": "annotations",
-				"Type": "map[enum]bool",
-				"Doc": "annotations specifies the various kinds of optimization diagnostics\nthat should be reported by the gc_details command.\n",
-				"EnumKeys": {
-					"ValueType": "bool",
-					"Keys": [
-						{
-							"Name": "\"bounds\"",
-							"Doc": "`\"bounds\"` controls bounds checking diagnostics.\n",
-							"Default": "true"
-						},
-						{
-							"Name": "\"escape\"",
-							"Doc": "`\"escape\"` controls diagnostics about escape choices.\n",
-							"Default": "true"
-						},
-						{
-							"Name": "\"inline\"",
-							"Doc": "`\"inline\"` controls diagnostics about inlining choices.\n",
-							"Default": "true"
-						},
-						{
-							"Name": "\"nil\"",
-							"Doc": "`\"nil\"` controls nil checks.\n",
-							"Default": "true"
-						}
-					]
-				},
-				"EnumValues": null,
-				"Default": "{\"bounds\":true,\"escape\":true,\"inline\":true,\"nil\":true}",
 				"Status": "experimental",
 				"Hierarchy": "ui.diagnostic"
 			},
@@ -791,15 +767,10 @@
 			{
 				"Name": "codelenses",
 				"Type": "map[enum]bool",
-				"Doc": "codelenses overrides the enabled/disabled state of each of gopls'\nsources of [Code Lenses](codelenses.md).\n\nExample Usage:\n\n```json5\n\"gopls\": {\n...\n  \"codelenses\": {\n    \"generate\": false,  // Don't show the `go generate` lens.\n    \"gc_details\": true  // Show a code lens toggling the display of gc's choices.\n  }\n...\n}\n```\n",
+				"Doc": "codelenses overrides the enabled/disabled state of each of gopls'\nsources of [Code Lenses](codelenses.md).\n\nExample Usage:\n\n```json5\n\"gopls\": {\n...\n  \"codelenses\": {\n    \"generate\": false,  // Don't show the `go generate` lens.\n  }\n...\n}\n```\n",
 				"EnumKeys": {
 					"ValueType": "bool",
 					"Keys": [
-						{
-							"Name": "\"gc_details\"",
-							"Doc": "`\"gc_details\"`: Toggle display of Go compiler optimization decisions\n\nThis codelens source causes the `package` declaration of\neach file to be annotated with a command to toggle the\nstate of the per-session variable that controls whether\noptimization decisions from the Go compiler (formerly known\nas \"gc\") should be displayed as diagnostics.\n\nOptimization decisions include:\n- whether a variable escapes, and how escape is inferred;\n- whether a nil-pointer check is implied or eliminated;\n- whether a function can be inlined.\n\nTODO(adonovan): this source is off by default because the\nannotation is annoying and because VS Code has a separate\n\"Toggle gc details\" command. Replace it with a Code Action\n(\"Source action...\").\n",
-							"Default": "false"
-						},
 						{
 							"Name": "\"generate\"",
 							"Doc": "`\"generate\"`: Run `go generate`\n\nThis codelens source annotates any `//go:generate` comments\nwith commands to run `go generate` in this directory, on\nall directories recursively beneath this one.\n\nSee [Generating code](https://go.dev/blog/generate) for\nmore details.\n",
@@ -843,7 +814,7 @@
 					]
 				},
 				"EnumValues": null,
-				"Default": "{\"gc_details\":false,\"generate\":true,\"regenerate_cgo\":true,\"run_govulncheck\":false,\"tidy\":true,\"upgrade_dependency\":true,\"vendor\":true}",
+				"Default": "{\"generate\":true,\"regenerate_cgo\":true,\"run_govulncheck\":false,\"tidy\":true,\"upgrade_dependency\":true,\"vendor\":true}",
 				"Status": "",
 				"Hierarchy": "ui"
 			},
@@ -928,13 +899,6 @@
 		]
 	},
 	"Lenses": [
-		{
-			"FileType": "Go",
-			"Lens": "gc_details",
-			"Title": "Toggle display of Go compiler optimization decisions",
-			"Doc": "\nThis codelens source causes the `package` declaration of\neach file to be annotated with a command to toggle the\nstate of the per-session variable that controls whether\noptimization decisions from the Go compiler (formerly known\nas \"gc\") should be displayed as diagnostics.\n\nOptimization decisions include:\n- whether a variable escapes, and how escape is inferred;\n- whether a nil-pointer check is implied or eliminated;\n- whether a function can be inlined.\n\nTODO(adonovan): this source is off by default because the\nannotation is annoying and because VS Code has a separate\n\"Toggle gc details\" command. Replace it with a Code Action\n(\"Source action...\").\n",
-			"Default": false
-		},
 		{
 			"FileType": "Go",
 			"Lens": "generate",
@@ -1102,6 +1066,12 @@
 			"Default": true
 		},
 		{
+			"Name": "hostport",
+			"Doc": "check format of addresses passed to net.Dial\n\nThis analyzer flags code that produce network address strings using\nfmt.Sprintf, as in this example:\n\n    addr := fmt.Sprintf(\"%s:%d\", host, 12345) // \"will not work with IPv6\"\n    ...\n    conn, err := net.Dial(\"tcp\", addr)       // \"when passed to dial here\"\n\nThe analyzer suggests a fix to use the correct approach, a call to\nnet.JoinHostPort:\n\n    addr := net.JoinHostPort(host, \"12345\")\n    ...\n    conn, err := net.Dial(\"tcp\", addr)\n\nA similar diagnostic and fix are produced for a format string of \"%s:%s\".\n",
+			"URL": "https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/hostport",
+			"Default": true
+		},
+		{
 			"Name": "httpresponse",
 			"Doc": "check for mistakes using HTTP responses\n\nA common mistake when using the net/http package is to defer a function\ncall to close the http.Response Body before checking the error that\ndetermines whether the response is valid:\n\n\tresp, err := http.Head(url)\n\tdefer resp.Body.Close()\n\tif err != nil {\n\t\tlog.Fatal(err)\n\t}\n\t// (defer statement belongs here)\n\nThis checker helps uncover latent nil dereference bugs by reporting a\ndiagnostic for such mistakes.",
 			"URL": "https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/httpresponse",
@@ -1129,6 +1099,12 @@
 			"Name": "lostcancel",
 			"Doc": "check cancel func returned by context.WithCancel is called\n\nThe cancellation function returned by context.WithCancel, WithTimeout,\nWithDeadline and variants such as WithCancelCause must be called,\nor the new context will remain live until its parent context is cancelled.\n(The background context is never cancelled.)",
 			"URL": "https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/lostcancel",
+			"Default": true
+		},
+		{
+			"Name": "modernize",
+			"Doc": "simplify code by using modern constructs\n\nThis analyzer reports opportunities for simplifying and clarifying\nexisting code by using more modern features of Go, such as:\n\n  - replacing an if/else conditional assignment by a call to the\n    built-in min or max functions added in go1.21;\n  - replacing sort.Slice(x, func(i, j int) bool) { return s[i] \u003c s[j] }\n    by a call to slices.Sort(s), added in go1.21;\n  - replacing interface{} by the 'any' type added in go1.18;\n  - replacing append([]T(nil), s...) by slices.Clone(s) or\n    slices.Concat(s), added in go1.21;\n  - replacing a loop around an m[k]=v map update by a call\n    to one of the Collect, Copy, Clone, or Insert functions\n    from the maps package, added in go1.21;\n  - replacing []byte(fmt.Sprintf...) by fmt.Appendf(nil, ...),\n    added in go1.19;\n  - replacing uses of context.WithCancel in tests with t.Context, added in\n    go1.24;",
+			"URL": "https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/modernize",
 			"Default": true
 		},
 		{
@@ -1270,6 +1246,12 @@
 			"Default": true
 		},
 		{
+			"Name": "unusedfunc",
+			"Doc": "check for unused functions and methods\n\nThe unusedfunc analyzer reports functions and methods that are\nnever referenced outside of their own declaration.\n\nA function is considered unused if it is unexported and not\nreferenced (except within its own declaration).\n\nA method is considered unused if it is unexported, not referenced\n(except within its own declaration), and its name does not match\nthat of any method of an interface type declared within the same\npackage.\n\nThe tool may report a false positive for a declaration of an\nunexported function that is referenced from another package using\nthe go:linkname mechanism, if the declaration's doc comment does\nnot also have a go:linkname comment. (Such code is in any case\nstrongly discouraged: linkname annotations, if they must be used at\nall, should be used on both the declaration and the alias.)\n\nThe unusedfunc algorithm is not as precise as the\ngolang.org/x/tools/cmd/deadcode tool, but it has the advantage that\nit runs within the modular analysis framework, enabling near\nreal-time feedback within gopls.",
+			"URL": "https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/unusedfunc",
+			"Default": true
+		},
+		{
 			"Name": "unusedparams",
 			"Doc": "check for unused parameters of functions\n\nThe unusedparams analyzer checks functions to see if there are\nany parameters that are not being used.\n\nTo ensure soundness, it ignores:\n  - \"address-taken\" functions, that is, functions that are used as\n    a value rather than being called directly; their signatures may\n    be required to conform to a func type.\n  - exported functions or methods, since they may be address-taken\n    in another package.\n  - unexported methods whose name matches an interface method\n    declared in the same package, since the method's signature\n    may be required to conform to the interface type.\n  - functions with empty bodies, or containing just a call to panic.\n  - parameters that are unnamed, or named \"_\", the blank identifier.\n\nThe analyzer suggests a fix of replacing the parameter name by \"_\",\nbut in such cases a deeper fix can be obtained by invoking the\n\"Refactor: remove unused parameter\" code action, which will\neliminate the parameter entirely, along with all corresponding\narguments at call sites, while taking care to preserve any side\neffects in the argument expressions; see\nhttps://github.com/golang/tools/releases/tag/gopls%2Fv0.14.",
 			"URL": "https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/unusedparams",
@@ -1285,19 +1267,13 @@
 			"Name": "unusedvariable",
 			"Doc": "check for unused variables and suggest fixes",
 			"URL": "https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/unusedvariable",
-			"Default": false
+			"Default": true
 		},
 		{
 			"Name": "unusedwrite",
 			"Doc": "checks for unused writes\n\nThe analyzer reports instances of writes to struct fields and\narrays that are never read. Specifically, when a struct object\nor an array is copied, its elements are copied implicitly by\nthe compiler, and any element write to this copy does nothing\nwith the original object.\n\nFor example:\n\n\ttype T struct { x int }\n\n\tfunc f(input []T) {\n\t\tfor i, v := range input {  // v is a copy\n\t\t\tv.x = i  // unused write to field x\n\t\t}\n\t}\n\nAnother example is about non-pointer receiver:\n\n\ttype T struct { x int }\n\n\tfunc (t T) f() {  // t is a copy\n\t\tt.x = i  // unused write to field x\n\t}",
 			"URL": "https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/unusedwrite",
 			"Default": true
-		},
-		{
-			"Name": "useany",
-			"Doc": "check for constraints that could be simplified to \"any\"",
-			"URL": "https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/useany",
-			"Default": false
 		},
 		{
 			"Name": "waitgroup",

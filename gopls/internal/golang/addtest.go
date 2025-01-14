@@ -17,7 +17,6 @@ import (
 	"go/types"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"text/template"
@@ -29,6 +28,7 @@ import (
 	"golang.org/x/tools/gopls/internal/cache/parsego"
 	"golang.org/x/tools/gopls/internal/protocol"
 	goplsastutil "golang.org/x/tools/gopls/internal/util/astutil"
+	"golang.org/x/tools/gopls/internal/util/moremaps"
 	"golang.org/x/tools/internal/imports"
 	"golang.org/x/tools/internal/typesinternal"
 )
@@ -418,13 +418,13 @@ func AddTestForFunc(ctx context.Context, snapshot *cache.Snapshot, loc protocol.
 		}
 	}
 
-	// qf qualifier determines the correct package name to use for a type in
+	// qual qualifier determines the correct package name to use for a type in
 	// foo_test.go. It does this by:
 	// - Consult imports map from test file foo_test.go.
 	// - If not found, consult imports map from original file foo.go.
 	// If the package is not imported in test file foo_test.go, it is added to
 	// extraImports map.
-	qf := func(p *types.Package) string {
+	qual := func(p *types.Package) string {
 		// References from an in-package test should not be qualified.
 		if !xtest && p == pkg.Types() {
 			return ""
@@ -472,8 +472,8 @@ func AddTestForFunc(ctx context.Context, snapshot *cache.Snapshot, loc protocol.
 	}
 
 	data := testInfo{
-		TestingPackageName: qf(types.NewPackage("testing", "testing")),
-		PackageName:        qf(pkg.Types()),
+		TestingPackageName: qual(types.NewPackage("testing", "testing")),
+		PackageName:        qual(pkg.Types()),
 		TestFuncName:       testName,
 		Func: function{
 			Name: fn.Name(),
@@ -493,11 +493,11 @@ func AddTestForFunc(ctx context.Context, snapshot *cache.Snapshot, loc protocol.
 	for i := range sig.Params().Len() {
 		param := sig.Params().At(i)
 		name, typ := param.Name(), param.Type()
-		f := field{Type: types.TypeString(typ, qf)}
+		f := field{Type: types.TypeString(typ, qual)}
 		if i == 0 && isContextType(typ) {
-			f.Value = qf(types.NewPackage("context", "context")) + ".Background()"
+			f.Value = qual(types.NewPackage("context", "context")) + ".Background()"
 		} else if name == "" || name == "_" {
-			f.Value = typesinternal.ZeroString(typ, qf)
+			f.Value, _ = typesinternal.ZeroString(typ, qual)
 		} else {
 			f.Name = name
 		}
@@ -516,7 +516,7 @@ func AddTestForFunc(ctx context.Context, snapshot *cache.Snapshot, loc protocol.
 		}
 		data.Func.Results = append(data.Func.Results, field{
 			Name: name,
-			Type: types.TypeString(typ, qf),
+			Type: types.TypeString(typ, qual),
 		})
 	}
 
@@ -575,7 +575,7 @@ func AddTestForFunc(ctx context.Context, snapshot *cache.Snapshot, loc protocol.
 		data.Receiver = &receiver{
 			Var: field{
 				Name: varName,
-				Type: types.TypeString(recvType, qf),
+				Type: types.TypeString(recvType, qual),
 			},
 		}
 
@@ -627,11 +627,11 @@ func AddTestForFunc(ctx context.Context, snapshot *cache.Snapshot, loc protocol.
 			for i := range constructor.Signature().Params().Len() {
 				param := constructor.Signature().Params().At(i)
 				name, typ := param.Name(), param.Type()
-				f := field{Type: types.TypeString(typ, qf)}
+				f := field{Type: types.TypeString(typ, qual)}
 				if i == 0 && isContextType(typ) {
-					f.Value = qf(types.NewPackage("context", "context")) + ".Background()"
+					f.Value = qual(types.NewPackage("context", "context")) + ".Background()"
 				} else if name == "" || name == "_" {
-					f.Value = typesinternal.ZeroString(typ, qf)
+					f.Value, _ = typesinternal.ZeroString(typ, qual)
 				} else {
 					f.Name = name
 				}
@@ -653,7 +653,7 @@ func AddTestForFunc(ctx context.Context, snapshot *cache.Snapshot, loc protocol.
 				}
 				data.Receiver.Constructor.Results = append(data.Receiver.Constructor.Results, field{
 					Name: name,
-					Type: types.TypeString(typ, qf),
+					Type: types.TypeString(typ, qual),
 				})
 			}
 		}
@@ -727,15 +727,10 @@ func AddTestForFunc(ctx context.Context, snapshot *cache.Snapshot, loc protocol.
 			}
 		} else {
 			importsBuffer.WriteString("\nimport(")
-			// Loop over the map in sorted order ensures deterministic outcome.
-			paths := make([]string, 0, len(extraImports))
-			for key := range extraImports {
-				paths = append(paths, key)
-			}
-			sort.Strings(paths)
-			for _, path := range paths {
+			// Sort for determinism.
+			for path, name := range moremaps.Sorted(extraImports) {
 				importsBuffer.WriteString("\n\t")
-				if name := extraImports[path]; name != "" {
+				if name != "" {
 					importsBuffer.WriteString(name + " ")
 				}
 				importsBuffer.WriteString(fmt.Sprintf("\"%s\"", path))

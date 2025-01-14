@@ -2999,30 +2999,6 @@ func constant(p *packages.Package, name string) *types.Const {
 	return c.(*types.Const)
 }
 
-func copyAll(srcPath, dstPath string) error {
-	return filepath.Walk(srcPath, func(path string, info os.FileInfo, _ error) error {
-		if info.IsDir() {
-			return nil
-		}
-		contents, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(srcPath, path)
-		if err != nil {
-			return err
-		}
-		dstFilePath := strings.Replace(filepath.Join(dstPath, rel), "definitelynot_go.mod", "go.mod", -1)
-		if err := os.MkdirAll(filepath.Dir(dstFilePath), 0755); err != nil {
-			return err
-		}
-		if err := os.WriteFile(dstFilePath, contents, 0644); err != nil {
-			return err
-		}
-		return nil
-	})
-}
-
 func TestExportFile(t *testing.T) {
 	// This used to trigger the log.Fatal in loadFromExportData.
 	// See go.dev/issue/45584.
@@ -3181,8 +3157,7 @@ func TestIssue69606b(t *testing.T) {
 // in another package (m/b) where the types for m/b are coming from the compiler,
 // e.g. `go list -compiled=true ... m/b`.
 func TestIssue70394(t *testing.T) {
-	// TODO(taking): backport https://go.dev/cl/604099 so that this works on 23.
-	testenv.NeedsGo1Point(t, 24)
+	testenv.NeedsGo1Point(t, 23)
 	testenv.NeedsTool(t, "go") // requires go list.
 	testenv.NeedsGoBuild(t)    // requires the compiler for export data.
 
@@ -3222,7 +3197,7 @@ func TestIssue70394(t *testing.T) {
 	}
 }
 
-// TestNeedTypesInfoOnly tests when NeedTypesInfo was set and NeedSyntax & NeedTypes were not,
+// TestLoadTypesInfoWithoutSyntaxOrTypes tests when NeedTypesInfo was set and NeedSyntax & NeedTypes were not,
 // Load should include the TypesInfo of packages properly
 func TestLoadTypesInfoWithoutSyntaxOrTypes(t *testing.T) {
 	testAllOrModulesParallel(t, testLoadTypesInfoWithoutSyntaxOrTypes)
@@ -3363,7 +3338,7 @@ func main() {
 
 	pkgs, err := packages.Load(&packages.Config{
 		Mode: packages.NeedName | packages.NeedTarget,
-		Env:  []string{"GOPATH=" + gopath, "GO111MODULE=off"},
+		Env:  append(os.Environ(), "GOPATH="+gopath, "GO111MODULE=off"),
 	}, filepath.Join(gopath, "src", "..."))
 	if err != nil {
 		t.Fatal(err)

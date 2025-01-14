@@ -33,6 +33,7 @@ import (
 	"golang.org/x/tools/gopls/internal/label"
 	"golang.org/x/tools/gopls/internal/protocol"
 	"golang.org/x/tools/gopls/internal/util/bug"
+	"golang.org/x/tools/gopls/internal/util/moremaps"
 	"golang.org/x/tools/gopls/internal/util/safetoken"
 	"golang.org/x/tools/internal/analysisinternal"
 	"golang.org/x/tools/internal/event"
@@ -1289,6 +1290,7 @@ func (s *Snapshot) typerefData(ctx context.Context, id PackageID, imports map[Im
 		return data, nil
 	} else if err != filecache.ErrNotFound {
 		bug.Reportf("internal error reading typerefs data: %v", err)
+		// Unexpected error: treat as cache miss, and fall through.
 	}
 
 	pgfs, err := s.view.parseCache.parseFiles(ctx, token.NewFileSet(), parsego.Full&^parser.ParseComments, true, cgfs...)
@@ -1314,13 +1316,7 @@ func typerefsKey(id PackageID, imports map[ImportPath]*metadata.Package, compile
 
 	fmt.Fprintf(hasher, "typerefs: %s\n", id)
 
-	importPaths := make([]string, 0, len(imports))
-	for impPath := range imports {
-		importPaths = append(importPaths, string(impPath))
-	}
-	sort.Strings(importPaths)
-	for _, importPath := range importPaths {
-		imp := imports[ImportPath(importPath)]
+	for importPath, imp := range moremaps.Sorted(imports) {
 		// TODO(rfindley): strength reduce the typerefs.Export API to guarantee
 		// that it only depends on these attributes of dependencies.
 		fmt.Fprintf(hasher, "import %s %s %s", importPath, imp.ID, imp.Name)
@@ -1431,13 +1427,8 @@ func localPackageKey(inputs *typeCheckInputs) file.Hash {
 	fmt.Fprintf(hasher, "go %s\n", inputs.goVersion)
 
 	// import map
-	importPaths := make([]string, 0, len(inputs.depsByImpPath))
-	for impPath := range inputs.depsByImpPath {
-		importPaths = append(importPaths, string(impPath))
-	}
-	sort.Strings(importPaths)
-	for _, impPath := range importPaths {
-		fmt.Fprintf(hasher, "import %s %s", impPath, string(inputs.depsByImpPath[ImportPath(impPath)]))
+	for impPath, depID := range moremaps.Sorted(inputs.depsByImpPath) {
+		fmt.Fprintf(hasher, "import %s %s", impPath, depID)
 	}
 
 	// file names and contents
@@ -1720,7 +1711,7 @@ func depsErrors(ctx context.Context, snapshot *Snapshot, mp *metadata.Package) (
 		}
 
 		directImporter := depsError.ImportStack[directImporterIdx]
-		if snapshot.isWorkspacePackage(PackageID(directImporter)) {
+		if snapshot.IsWorkspacePackage(PackageID(directImporter)) {
 			continue
 		}
 		relevantErrors = append(relevantErrors, depsError)
@@ -1766,7 +1757,7 @@ func depsErrors(ctx context.Context, snapshot *Snapshot, mp *metadata.Package) (
 	for _, depErr := range relevantErrors {
 		for i := len(depErr.ImportStack) - 1; i >= 0; i-- {
 			item := depErr.ImportStack[i]
-			if snapshot.isWorkspacePackage(PackageID(item)) {
+			if snapshot.IsWorkspacePackage(PackageID(item)) {
 				break
 			}
 

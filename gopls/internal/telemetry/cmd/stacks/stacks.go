@@ -90,10 +90,83 @@ import (
 
 // flags
 var (
+	programFlag = flag.String("program", "golang.org/x/tools/gopls", "Package path of program to process")
+
 	daysFlag = flag.Int("days", 7, "number of previous days of telemetry data to read")
 
 	authToken string // mandatory GitHub authentication token (for R/W issues access)
 )
+
+// ProgramConfig is the configuration for processing reports for a specific
+// program.
+type ProgramConfig struct {
+	// Program is the package path of the program to process.
+	Program string
+
+	// IncludeClient indicates that stack Info should include gopls/client metadata.
+	IncludeClient bool
+
+	// SearchLabel is the GitHub label used to find all existing reports.
+	SearchLabel string
+
+	// NewIssuePrefix is the package prefix to apply to new issue titles.
+	NewIssuePrefix string
+
+	// NewIssueLabels are the labels to apply to new issues.
+	NewIssueLabels []string
+
+	// MatchSymbolPrefix is the prefix of "interesting" symbol names.
+	//
+	// A given stack will be "blamed" on the deepest symbol in the stack that:
+	// 1. Matches MatchSymbolPrefix
+	// 2. Is an exported function or any method on an exported Type.
+	// 3. Does _not_ match IgnoreSymbolContains.
+	MatchSymbolPrefix string
+
+	// IgnoreSymbolContains are "uninteresting" symbol substrings. e.g.,
+	// logging packages.
+	IgnoreSymbolContains []string
+}
+
+var programs = map[string]ProgramConfig{
+	"golang.org/x/tools/gopls": {
+		Program:        "golang.org/x/tools/gopls",
+		IncludeClient:  true,
+		SearchLabel:    "gopls/telemetry-wins",
+		NewIssuePrefix: "x/tools/gopls",
+		NewIssueLabels: []string{
+			"gopls",
+			"Tools",
+			"gopls/telemetry-wins",
+			"NeedsInvestigation",
+		},
+		MatchSymbolPrefix: "golang.org/x/tools/gopls/",
+		IgnoreSymbolContains: []string{
+			"internal/util/bug.",
+		},
+	},
+	"cmd/compile": {
+		Program:        "cmd/compile",
+		SearchLabel:    "compiler/telemetry-wins",
+		NewIssuePrefix: "cmd/compile",
+		NewIssueLabels: []string{
+			"compiler/runtime",
+			"compiler/telemetry-wins",
+			"NeedsInvestigation",
+		},
+		MatchSymbolPrefix: "cmd/compile",
+		IgnoreSymbolContains: []string{
+			// Various "fatal" wrappers.
+			"Fatal", // base.Fatal*, ssa.Value.Fatal*, etc.
+			"cmd/compile/internal/base.Assert",
+			"cmd/compile/internal/noder.assert",
+			"cmd/compile/internal/ssa.Compile.func1", // basically a Fatalf wrapper.
+			// Panic recovery.
+			"cmd/compile/internal/types2.(*Checker).handleBailout",
+			"cmd/compile/internal/gc.handlePanic",
+		},
+	},
+}
 
 func main() {
 	log.SetFlags(0)
@@ -127,26 +200,125 @@ func main() {
 		authToken = string(bytes.TrimSpace(content))
 	}
 
-	// Maps stack text to Info to count.
-	stacks := make(map[string]map[Info]int64)
-	var distinctStacks int
-
-	// Maps stack to a telemetry URL.
-	stackToURL := make(map[string]string)
+	pcfg, ok := programs[*programFlag]
+	if !ok {
+		log.Fatalf("unknown -program %s", *programFlag)
+	}
 
 	// Read all recent telemetry reports.
+	stacks, distinctStacks, stackToURL, err := readReports(pcfg, *daysFlag)
+	if err != nil {
+		log.Fatalf("Error reading reports: %v", err)
+	}
+
+	issues, err := readIssues(pcfg)
+	if err != nil {
+		log.Fatalf("Error reading issues: %v", err)
+	}
+
+	// Map stacks to existing issues (if any).
+	claimedBy := claimStacks(issues, stacks)
+
+	// Update existing issues that claimed new stacks.
+	updateIssues(issues, stacks, stackToURL)
+
+	// For each stack, show existing issue or create a new one.
+	// Aggregate stack IDs by issue summary.
+	var (
+		// Both vars map the summary line to the stack count.
+		existingIssues = make(map[string]int64)
+		newIssues      = make(map[string]int64)
+	)
+	for stack, counts := range stacks {
+		id := stackID(stack)
+
+		var total int64
+		for _, count := range counts {
+			total += count
+		}
+
+		if issue, ok := claimedBy[id]; ok {
+			// existing issue, already updated above, just store
+			// the summary.
+			summary := fmt.Sprintf("#%d: %s [%s]",
+				issue.Number, issue.Title, issue.State)
+			existingIssues[summary] += total
+		} else {
+			// new issue, need to create GitHub issue and store
+			// summary.
+			title := newIssue(pcfg, stack, id, stackToURL[stack], counts)
+			summary := fmt.Sprintf("%s: %s [%s]", id, title, "new")
+			newIssues[summary] += total
+		}
+	}
+
+	fmt.Printf("Found %d distinct stacks in last %v days:\n", distinctStacks, *daysFlag)
+	print := func(caption string, issues map[string]int64) {
+		// Print items in descending frequency.
+		keys := moremaps.KeySlice(issues)
+		sort.Slice(keys, func(i, j int) bool {
+			return issues[keys[i]] > issues[keys[j]]
+		})
+		fmt.Printf("%s issues:\n", caption)
+		for _, summary := range keys {
+			count := issues[summary]
+			// Show closed issues in "white".
+			if isTerminal(os.Stdout) && strings.Contains(summary, "[closed]") {
+				// ESC + "[" + n + "m" => change color to n
+				// (37 = white, 0 = default)
+				summary = "\x1B[37m" + summary + "\x1B[0m"
+			}
+			fmt.Printf("%s (n=%d)\n", summary, count)
+		}
+	}
+	print("Existing", existingIssues)
+	print("New", newIssues)
+}
+
+// Info is used as a key for de-duping and aggregating.
+// Do not add detail about particular records (e.g. data, telemetry URL).
+type Info struct {
+	Program        string // "golang.org/x/tools/gopls"
+	ProgramVersion string // "v0.16.1"
+	GoVersion      string // "go1.23"
+	GOOS, GOARCH   string
+	GoplsClient    string // e.g. "vscode" (only set if Program == "golang.org/x/tools/gopls")
+}
+
+func (info Info) String() string {
+	s := fmt.Sprintf("%s@%s %s %s/%s",
+		info.Program, info.ProgramVersion,
+		info.GoVersion, info.GOOS, info.GOARCH)
+	if info.GoplsClient != "" {
+		s += " " + info.GoplsClient
+	}
+	return s
+}
+
+// readReports downloads telemetry stack reports for a program from the
+// specified number of most recent days.
+//
+// stacks is a map of stack text to program metadata to stack+metadata report
+// count.
+// distinctStacks is the sum of all counts in stacks.
+// stackToURL maps the stack text to the oldest telemetry JSON report it was
+// included in.
+func readReports(pcfg ProgramConfig, days int) (stacks map[string]map[Info]int64, distinctStacks int, stackToURL map[string]string, err error) {
+	stacks = make(map[string]map[Info]int64)
+	stackToURL = make(map[string]string)
+
 	t := time.Now()
-	for i := 0; i < *daysFlag; i++ {
+	for i := range days {
 		date := t.Add(-time.Duration(i+1) * 24 * time.Hour).Format(time.DateOnly)
 
 		url := fmt.Sprintf("https://storage.googleapis.com/prod-telemetry-merged/%s.json", date)
 		resp, err := http.Get(url)
 		if err != nil {
-			log.Fatalf("can't GET %s: %v", url, err)
+			return nil, 0, nil, fmt.Errorf("error on GET %s: %v", url, err)
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode != 200 {
-			log.Fatalf("GET %s returned %d %s", url, resp.StatusCode, resp.Status)
+			return nil, 0, nil, fmt.Errorf("GET %s returned %d %s", url, resp.StatusCode, resp.Status)
 		}
 
 		dec := json.NewDecoder(resp.Body)
@@ -156,13 +328,20 @@ func main() {
 				if err == io.EOF {
 					break
 				}
-				log.Fatal(err)
+				return nil, 0, nil, fmt.Errorf("error decoding report: %v", err)
 			}
 			for _, prog := range report.Programs {
-				if prog.Program == "golang.org/x/tools/gopls" && len(prog.Stacks) > 0 {
-					// Include applicable client names (e.g. vscode, eglot).
+				if prog.Program != pcfg.Program {
+					continue
+				}
+				if len(prog.Stacks) == 0 {
+					continue
+				}
+
+				// Include applicable client names (e.g. vscode, eglot) for gopls.
+				var clientSuffix string
+				if pcfg.IncludeClient {
 					var clients []string
-					var clientSuffix string
 					for key := range prog.Counters {
 						client := strings.TrimPrefix(key, "gopls/client:")
 						if client != key {
@@ -173,52 +352,53 @@ func main() {
 					if len(clients) > 0 {
 						clientSuffix = strings.Join(clients, ",")
 					}
+				}
 
-					// Ignore @devel versions as they correspond to
-					// ephemeral (and often numerous) variations of
-					// the program as we work on a fix to a bug.
-					if prog.Version == "devel" {
-						continue
-					}
+				// Ignore @devel versions as they correspond to
+				// ephemeral (and often numerous) variations of
+				// the program as we work on a fix to a bug.
+				if prog.Version == "devel" {
+					continue
+				}
 
-					distinctStacks++
+				distinctStacks++
 
-					info := Info{
-						Program:   prog.Program,
-						Version:   prog.Version,
-						GoVersion: prog.GoVersion,
-						GOOS:      prog.GOOS,
-						GOARCH:    prog.GOARCH,
-						Client:    clientSuffix,
+				info := Info{
+					Program:        prog.Program,
+					ProgramVersion: prog.Version,
+					GoVersion:      prog.GoVersion,
+					GOOS:           prog.GOOS,
+					GOARCH:         prog.GOARCH,
+					GoplsClient:    clientSuffix,
+				}
+				for stack, count := range prog.Stacks {
+					counts := stacks[stack]
+					if counts == nil {
+						counts = make(map[Info]int64)
+						stacks[stack] = counts
 					}
-					for stack, count := range prog.Stacks {
-						counts := stacks[stack]
-						if counts == nil {
-							counts = make(map[Info]int64)
-							stacks[stack] = counts
-						}
-						counts[info] += count
-						stackToURL[stack] = url
-					}
+					counts[info] += count
+					stackToURL[stack] = url
 				}
 			}
 		}
 	}
 
-	// Query GitHub for all existing GitHub issues with label:gopls/telemetry-wins.
-	//
-	// TODO(adonovan): by default GitHub returns at most 30
-	// issues; we have lifted this to 100 using per_page=%d, but
-	// that won't work forever; use paging.
-	const query = "is:issue label:gopls/telemetry-wins"
-	res, err := searchIssues(query)
+	return stacks, distinctStacks, stackToURL, nil
+}
+
+// readIssues returns all existing issues for the given program and parses any
+// predicates.
+func readIssues(pcfg ProgramConfig) ([]*Issue, error) {
+	// Query GitHub for all existing GitHub issues with the report label.
+	issues, err := searchIssues(pcfg.SearchLabel)
 	if err != nil {
-		log.Fatalf("GitHub issues query %q failed: %v", query, err)
+		log.Fatalf("GitHub issues label %q search failed: %v", pcfg.SearchLabel, err)
 	}
 
 	// Extract and validate predicate expressions in ```#!stacks...``` code blocks.
 	// See the package doc comment for the grammar.
-	for _, issue := range res.Items {
+	for _, issue := range issues {
 		block := findPredicateBlock(issue.Body)
 		if block != "" {
 			expr, err := parser.ParseExpr(block)
@@ -295,6 +475,25 @@ func main() {
 		}
 	}
 
+	return issues, nil
+}
+
+// claimStack maps each stack ID to its issue (if any).
+//
+// It returns a map of stack text to the issue that claimed it.
+//
+// An issue can claim a stack two ways:
+//
+//  1. if the issue body contains the ID of the stack. Matching
+//     is a little loose but base64 will rarely produce words
+//     that appear in the body by chance.
+//
+//  2. if the issue body contains a ```#!stacks``` predicate
+//     that matches the stack.
+//
+// We log an error if two different issues attempt to claim
+// the same stack.
+func claimStacks(issues []*Issue, stacks map[string]map[Info]int64) map[string]*Issue {
 	// Map each stack ID to its issue.
 	//
 	// An issue can claim a stack two ways:
@@ -313,7 +512,7 @@ func main() {
 	claimedBy := make(map[string]*Issue)
 	for stack := range stacks {
 		id := stackID(stack)
-		for _, issue := range res.Items {
+		for _, issue := range issues {
 			byPredicate := false
 			if strings.Contains(issue.Body, id) {
 				// nop
@@ -341,36 +540,12 @@ func main() {
 		}
 	}
 
-	// For each stack, show existing issue or create a new one.
-	// Aggregate stack IDs by issue summary.
-	var (
-		// Both vars map the summary line to the stack count.
-		existingIssues = make(map[string]int64)
-		newIssues      = make(map[string]int64)
-	)
-	for stack, counts := range stacks {
-		id := stackID(stack)
+	return claimedBy
+}
 
-		var total int64
-		for _, count := range counts {
-			total += count
-		}
-
-		if issue, ok := claimedBy[id]; ok {
-			// existing issue
-			summary := fmt.Sprintf("#%d: %s [%s]",
-				issue.Number, issue.Title, issue.State)
-			existingIssues[summary] += total
-		} else {
-			// new issue
-			title := newIssue(stack, id, stackToURL[stack], counts)
-			summary := fmt.Sprintf("%s: %s [%s]", id, title, "new")
-			newIssues[summary] += total
-		}
-	}
-
-	// Update existing issues that claimed new stacks by predicate.
-	for _, issue := range res.Items {
+// updateIssues updates existing issues that claimed new stacks by predicate.
+func updateIssues(issues []*Issue, stacks map[string]map[Info]int64, stackToURL map[string]string) {
+	for _, issue := range issues {
 		if len(issue.newStacks) == 0 {
 			continue
 		}
@@ -405,44 +580,6 @@ func main() {
 
 		log.Printf("added stacks %s to issue #%d", newStackIDs, issue.Number)
 	}
-
-	fmt.Printf("Found %d distinct stacks in last %v days:\n", distinctStacks, *daysFlag)
-	print := func(caption string, issues map[string]int64) {
-		// Print items in descending frequency.
-		keys := moremaps.KeySlice(issues)
-		sort.Slice(keys, func(i, j int) bool {
-			return issues[keys[i]] > issues[keys[j]]
-		})
-		fmt.Printf("%s issues:\n", caption)
-		for _, summary := range keys {
-			count := issues[summary]
-			// Show closed issues in "white".
-			if isTerminal(os.Stdout) && strings.Contains(summary, "[closed]") {
-				// ESC + "[" + n + "m" => change color to n
-				// (37 = white, 0 = default)
-				summary = "\x1B[37m" + summary + "\x1B[0m"
-			}
-			fmt.Printf("%s (n=%d)\n", summary, count)
-		}
-	}
-	print("Existing", existingIssues)
-	print("New", newIssues)
-}
-
-// Info is used as a key for de-duping and aggregating.
-// Do not add detail about particular records (e.g. data, telemetry URL).
-type Info struct {
-	Program            string // "golang.org/x/tools/gopls"
-	Version, GoVersion string // e.g. "gopls/v0.16.1", "go1.23"
-	GOOS, GOARCH       string
-	Client             string // e.g. "vscode"
-}
-
-func (info Info) String() string {
-	return fmt.Sprintf("%s@%s %s %s/%s %s",
-		info.Program, info.Version,
-		info.GoVersion, info.GOOS, info.GOARCH,
-		info.Client)
 }
 
 // stackID returns a 32-bit identifier for a stack
@@ -469,24 +606,27 @@ func stackID(stack string) string {
 // manually de-dup the issue before deciding whether to submit the form.)
 //
 // It returns the title.
-func newIssue(stack, id string, jsonURL string, counts map[Info]int64) string {
-	// Use a heuristic to find a suitable symbol to blame
-	// in the title: the first public function or method
-	// of a public type, in gopls, to appear in the stack
-	// trace. We can always refine it later.
+func newIssue(pcfg ProgramConfig, stack, id, jsonURL string, counts map[Info]int64) string {
+	// Use a heuristic to find a suitable symbol to blame in the title: the
+	// first public function or method of a public type, in
+	// MatchSymbolPrefix, to appear in the stack trace. We can always
+	// refine it later.
 	//
 	// TODO(adonovan): include in the issue a source snippet ±5
 	// lines around the PC in this symbol.
 	var symbol string
+outer:
 	for _, line := range strings.Split(stack, "\n") {
-		// Look for:
-		//   gopls/.../pkg.Func
-		//   gopls/.../pkg.Type.method
-		//   gopls/.../pkg.(*Type).method
-		if strings.Contains(line, "internal/util/bug.") {
-			continue // not interesting
+		for _, s := range pcfg.IgnoreSymbolContains {
+			if strings.Contains(line, s) {
+				continue outer // not interesting
+			}
 		}
-		if _, rest, ok := strings.Cut(line, "golang.org/x/tools/gopls/"); ok {
+		// Look for:
+		//   pcfg.MatchSymbolPrefix/.../pkg.Func
+		//   pcfg.MatchSymbolPrefix/.../pkg.Type.method
+		//   pcfg.MatchSymbolPrefix/.../pkg.(*Type).method
+		if _, rest, ok := strings.Cut(line, pcfg.MatchSymbolPrefix); ok {
 			if i := strings.IndexByte(rest, '.'); i >= 0 {
 				rest = rest[i+1:]
 				rest = strings.TrimPrefix(rest, "(*")
@@ -500,7 +640,7 @@ func newIssue(stack, id string, jsonURL string, counts map[Info]int64) string {
 	}
 
 	// Populate the form (title, body, label)
-	title := fmt.Sprintf("x/tools/gopls: bug in %s", symbol)
+	title := fmt.Sprintf("%s: bug in %s", pcfg.NewIssuePrefix, symbol)
 
 	body := new(bytes.Buffer)
 
@@ -513,7 +653,7 @@ func newIssue(stack, id string, jsonURL string, counts map[Info]int64) string {
 
 	writeStackComment(body, stack, id, jsonURL, counts)
 
-	const labels = "gopls,Tools,gopls/telemetry-wins,NeedsInvestigation"
+	labels := strings.Join(pcfg.NewIssueLabels, ",")
 
 	// Report it. The user will interactively finish the task,
 	// since they will typically de-dup it without even creating a new issue
@@ -543,7 +683,7 @@ func writeStackComment(body *bytes.Buffer, stack, id string, jsonURL string, cou
 		id, jsonURL)
 
 	// Read the mapping from symbols to file/line.
-	pclntab, err := readPCLineTable(info)
+	pclntab, err := readPCLineTable(info, defaultStacksDir)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -631,7 +771,7 @@ func frameURL(pclntab map[string]FileLine, info Info, frame string) string {
 		}
 
 		return fmt.Sprintf("https://cs.opensource.google/go/x/tools/+/%s:%s;l=%d",
-			"gopls/"+info.Version, rest, linenum)
+			"gopls/"+info.ProgramVersion, rest, linenum)
 	}
 
 	// other x/ module dependency?
@@ -653,28 +793,58 @@ func frameURL(pclntab map[string]FileLine, info Info, frame string) string {
 // -- GitHub search --
 
 // searchIssues queries the GitHub issue tracker.
-func searchIssues(query string) (*IssuesSearchResult, error) {
-	q := url.QueryEscape(query)
+func searchIssues(label string) ([]*Issue, error) {
+	label = url.QueryEscape(label)
 
-	req, err := http.NewRequest("GET", "https://api.github.com/search/issues?q="+q+"&per_page=100", nil)
-	if err != nil {
-		return nil, err
+	// Slurp all issues with the telemetry label.
+	//
+	// The pagination link headers have an annoying format, but ultimately
+	// are just ?page=1, ?page=2, etc with no extra state. So just keep
+	// trying new pages until we get no more results.
+	//
+	// NOTE: With this scheme, GitHub clearly has no protection against
+	// race conditions, so presumably we could get duplicate issues or miss
+	// issues across pages.
+
+	getPage := func(page int) ([]*Issue, error) {
+		url := fmt.Sprintf("https://api.github.com/repos/golang/go/issues?state=all&labels=%s&per_page=100&page=%d", label, page)
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Add("Authorization", "Bearer "+authToken)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			return nil, fmt.Errorf("search query %s failed: %s (body: %s)", url, resp.Status, body)
+		}
+		var r []*Issue
+		if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+			return nil, err
+		}
+
+		return r, nil
 	}
-	req.Header.Add("Authorization", "Bearer "+authToken)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
+
+	var results []*Issue
+	for page := 1; ; page++ {
+		r, err := getPage(page)
+		if err != nil {
+			return nil, err
+		}
+		if len(r) == 0 {
+			// No more results.
+			break
+		}
+
+		results = append(results, r...)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("search query failed: %s (body: %s)", resp.Status, body)
-	}
-	var result IssuesSearchResult
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
-	}
-	return &result, nil
+
+	return results, nil
 }
 
 // updateIssueBody updates the body of the numbered issue.
@@ -737,12 +907,7 @@ func addIssueComment(number int, comment string) error {
 	return nil
 }
 
-// See https://developer.github.com/v3/search/#search-issues.
-
-type IssuesSearchResult struct {
-	TotalCount int `json:"total_count"`
-	Items      []*Issue
-}
+// See https://docs.github.com/en/rest/issues/issues?apiVersion=2022-11-28#list-repository-issues.
 
 type Issue struct {
 	Number    int
@@ -753,9 +918,12 @@ type Issue struct {
 	CreatedAt time.Time `json:"created_at"`
 	Body      string    // in Markdown format
 
+	// Set by readIssues.
 	predicateText string            // text of ```#!stacks...``` predicate block
 	predicate     func(string) bool // matching predicate over stack text
-	newStacks     []string          // new stacks to add to existing issue (comments and IDs)
+
+	// Set by claimIssues.
+	newStacks []string // new stacks to add to existing issue (comments and IDs)
 }
 
 type User struct {
@@ -770,63 +938,92 @@ type FileLine struct {
 	line int
 }
 
+const defaultStacksDir = "/tmp/stacks-cache"
+
 // readPCLineTable builds the gopls executable specified by info,
 // reads its PC-to-line-number table, and returns the file/line of
 // each TEXT symbol.
-func readPCLineTable(info Info) (map[string]FileLine, error) {
+//
+// stacksDir is a semi-durable temp directory (i.e. lasts for at least a few
+// hours) to hold recent sources and executables.
+func readPCLineTable(info Info, stacksDir string) (map[string]FileLine, error) {
 	// The stacks dir will be a semi-durable temp directory
 	// (i.e. lasts for at least hours) holding source trees
 	// and executables we have built recently.
 	//
 	// Each subdir will hold a specific revision.
-	stacksDir := "/tmp/gopls-stacks"
 	if err := os.MkdirAll(stacksDir, 0777); err != nil {
 		return nil, fmt.Errorf("can't create stacks dir: %v", err)
 	}
 
-	// Fetch the source for the tools repo,
-	// shallow-cloning just the desired revision.
-	// (Skip if it's already cloned.)
-	revDir := filepath.Join(stacksDir, info.Version)
-	if !fileExists(filepath.Join(revDir, "go.mod")) {
-		// We check for presence of the go.mod file,
-		// not just the directory itself, as the /tmp reaper
-		// often removes stale files before removing their directories.
-		// Remove those stale directories now.
-		_ = os.RemoveAll(revDir) // ignore errors
-
-		log.Printf("cloning tools@gopls/%s", info.Version)
-		if err := shallowClone(revDir, "https://go.googlesource.com/tools", "gopls/"+info.Version); err != nil {
+	// When building a subrepo tool, we must clone the source of the
+	// subrepo, and run go build from that checkout.
+	//
+	// When building a main repo tool, no need to clone or change
+	// directories. GOTOOLCHAIN is sufficient to fetch and build the
+	// appropriate version.
+	var buildDir string
+	switch info.Program {
+	case "golang.org/x/tools/gopls":
+		// Fetch the source for the tools repo,
+		// shallow-cloning just the desired revision.
+		// (Skip if it's already cloned.)
+		revDir := filepath.Join(stacksDir, info.ProgramVersion)
+		if !fileExists(filepath.Join(revDir, "go.mod")) {
+			// We check for presence of the go.mod file,
+			// not just the directory itself, as the /tmp reaper
+			// often removes stale files before removing their directories.
+			// Remove those stale directories now.
 			_ = os.RemoveAll(revDir) // ignore errors
-			return nil, fmt.Errorf("clone: %v", err)
+
+			// TODO(prattmic): Consider using ProgramConfig
+			// configuration if we add more configurations.
+			log.Printf("cloning tools@gopls/%s", info.ProgramVersion)
+			if err := shallowClone(revDir, "https://go.googlesource.com/tools", "gopls/"+info.ProgramVersion); err != nil {
+				_ = os.RemoveAll(revDir) // ignore errors
+				return nil, fmt.Errorf("clone: %v", err)
+			}
 		}
+
+		// gopls is in its own module, we must build from there.
+		buildDir = filepath.Join(revDir, "gopls")
+	case "cmd/compile":
+		// Nothing to do, GOTOOLCHAIN is sufficient.
+	default:
+		return nil, fmt.Errorf("don't know how to build unknown program %s", info.Program)
 	}
+
+	// No slashes in file name.
+	escapedProg := strings.Replace(info.Program, "/", "_", -1)
 
 	// Build the executable with the correct GOTOOLCHAIN, GOOS, GOARCH.
 	// Use -trimpath for normalized file names.
 	// (Skip if it's already built.)
-	exe := fmt.Sprintf("exe-%s.%s-%s", info.GoVersion, info.GOOS, info.GOARCH)
-	cmd := exec.Command("go", "build", "-trimpath", "-o", "../"+exe)
-	cmd.Stderr = os.Stderr
-	cmd.Dir = filepath.Join(revDir, "gopls")
-	cmd.Env = append(os.Environ(),
-		"GOTOOLCHAIN="+info.GoVersion,
-		"GOOS="+info.GOOS,
-		"GOARCH="+info.GOARCH,
-	)
-	if !fileExists(filepath.Join(revDir, exe)) {
+	exe := fmt.Sprintf("exe-%s-%s.%s-%s", escapedProg, info.GoVersion, info.GOOS, info.GOARCH)
+	exe = filepath.Join(stacksDir, exe)
+
+	if !fileExists(exe) {
 		log.Printf("building %s@%s with %s for %s/%s",
-			info.Program, info.Version, info.GoVersion, info.GOOS, info.GOARCH)
+			info.Program, info.ProgramVersion, info.GoVersion, info.GOOS, info.GOARCH)
+
+		cmd := exec.Command("go", "build", "-trimpath", "-o", exe, info.Program)
+		cmd.Stderr = os.Stderr
+		cmd.Dir = buildDir
+		cmd.Env = append(os.Environ(),
+			"GOTOOLCHAIN="+info.GoVersion,
+			"GOOS="+info.GOOS,
+			"GOARCH="+info.GOARCH,
+			"GOWORK=off",
+		)
 		if err := cmd.Run(); err != nil {
-			return nil, fmt.Errorf("building: %v (rm -fr /tmp/gopls-stacks?)", err)
+			return nil, fmt.Errorf("building: %v (rm -fr %s?)", err, stacksDir)
 		}
 	}
 
 	// Read pclntab of executable.
-	cmd = exec.Command("go", "tool", "objdump", exe)
+	cmd := exec.Command("go", "tool", "objdump", exe)
 	cmd.Stdout = new(strings.Builder)
 	cmd.Stderr = os.Stderr
-	cmd.Dir = revDir
 	cmd.Env = append(os.Environ(),
 		"GOTOOLCHAIN="+info.GoVersion,
 		"GOOS="+info.GOOS,

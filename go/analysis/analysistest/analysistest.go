@@ -191,11 +191,20 @@ func RunWithSuggestedFixes(t Testing, dir string, a *analysis.Analyzer, patterns
 							act.Analyzer.Name, start, end)
 						continue
 					}
-					file, endfile := act.Package.Fset.File(start), act.Package.Fset.File(end)
-					if file == nil || endfile == nil || file != endfile {
+					file := act.Package.Fset.File(start)
+					if file == nil {
+						t.Errorf("diagnostic for analysis %v contains Suggested Fix with malformed start position %v", act.Analyzer.Name, start)
+						continue
+					}
+					endFile := act.Package.Fset.File(end)
+					if endFile == nil {
+						t.Errorf("diagnostic for analysis %v contains Suggested Fix with malformed end position %v", act.Analyzer.Name, end)
+						continue
+					}
+					if file != endFile {
 						t.Errorf(
 							"diagnostic for analysis %v contains Suggested Fix with malformed spanning files %v and %v",
-							act.Analyzer.Name, file.Name(), endfile.Name())
+							act.Analyzer.Name, file.Name(), endFile.Name())
 						continue
 					}
 					if _, ok := fileContents[file]; !ok {
@@ -352,7 +361,7 @@ func Run(t Testing, dir string, a *analysis.Analyzer, patterns ...string) []*Res
 		testenv.NeedsGoPackages(t)
 	}
 
-	pkgs, err := loadPackages(a, dir, patterns...)
+	pkgs, err := loadPackages(dir, patterns...)
 	if err != nil {
 		t.Errorf("loading %s: %v", patterns, err)
 		return nil
@@ -433,7 +442,7 @@ type Result struct {
 // dependencies) from dir, which is the root of a GOPATH-style project tree.
 // loadPackages returns an error if any package had an error, or the pattern
 // matched no packages.
-func loadPackages(a *analysis.Analyzer, dir string, patterns ...string) ([]*packages.Package, error) {
+func loadPackages(dir string, patterns ...string) ([]*packages.Package, error) {
 	env := []string{"GOPATH=" + dir, "GO111MODULE=off", "GOWORK=off"} // GOPATH mode
 
 	// Undocumented module mode. Will be replaced by something better.
