@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -285,7 +286,7 @@ func (s *server) diagnoseChangedFiles(ctx context.Context, snapshot *cache.Snaps
 		// golang/go#65801: only diagnose changes to workspace packages. Otherwise,
 		// diagnostics will be unstable, as the slow-path diagnostics will erase
 		// them.
-		if snapshot.IsWorkspacePackage(ctx, meta.ID) {
+		if snapshot.IsWorkspacePackage(meta.ID) {
 			toDiagnose[meta.ID] = meta
 		}
 	}
@@ -433,7 +434,7 @@ func (s *server) diagnose(ctx context.Context, snapshot *cache.Snapshot) (diagMa
 	// For analysis, we use the *widest* package for each open file,
 	// for two reasons:
 	//
-	// - Correctness: some analyzers (e.g. unusedparam) depend
+	// - Correctness: some analyzers (e.g. unused{param,func}) depend
 	//   on it. If applied to a non-test package for which a
 	//   corresponding test package exists, they make assumptions
 	//   that are falsified in the test package, for example that
@@ -484,8 +485,8 @@ func (s *server) diagnose(ctx context.Context, snapshot *cache.Snapshot) (diagMa
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		gcDetailsReports, err := s.gcDetailsDiagnostics(ctx, snapshot, toDiagnose)
-		store("collecting gc_details", gcDetailsReports, err)
+		compilerOptDetailsDiags, err := s.compilerOptDetailsDiagnostics(ctx, snapshot, toDiagnose)
+		store("collecting compiler optimization details", compilerOptDetailsDiags, err)
 	}()
 
 	// Package diagnostics and analysis diagnostics must both be computed and
@@ -511,6 +512,24 @@ func (s *server) diagnose(ctx context.Context, snapshot *cache.Snapshot) (diagMa
 		// TODO(rfindley): here and above, we should avoid using the first result
 		// if err is non-nil (though as of today it's OK).
 		analysisDiags, err = golang.Analyze(ctx, snapshot, toAnalyze, s.progress)
+
+		// Filter out Hint diagnostics for closed files.
+		// VS Code already omits Hint diagnostics in the Problems tab, but other
+		// clients do not. This filter makes the visibility of Hints more similar
+		// across clients.
+		for uri, diags := range analysisDiags {
+			if !snapshot.IsOpen(uri) {
+				newDiags := slices.DeleteFunc(diags, func(diag *cache.Diagnostic) bool {
+					return diag.Severity == protocol.SeverityHint
+				})
+				if len(newDiags) == 0 {
+					delete(analysisDiags, uri)
+				} else {
+					analysisDiags[uri] = newDiags
+				}
+			}
+		}
+
 		if err != nil {
 			event.Error(ctx, "warning: analyzing package", err, append(snapshot.Labels(), label.Package.Of(keys.Join(moremaps.KeySlice(toDiagnose))))...)
 			return
@@ -536,30 +555,30 @@ func (s *server) diagnose(ctx context.Context, snapshot *cache.Snapshot) (diagMa
 	return diagnostics, nil
 }
 
-func (s *server) gcDetailsDiagnostics(ctx context.Context, snapshot *cache.Snapshot, toDiagnose map[metadata.PackageID]*metadata.Package) (diagMap, error) {
-	// Process requested gc_details diagnostics.
+func (s *server) compilerOptDetailsDiagnostics(ctx context.Context, snapshot *cache.Snapshot, toDiagnose map[metadata.PackageID]*metadata.Package) (diagMap, error) {
+	// Process requested diagnostics about compiler optimization details.
 	//
 	// TODO(rfindley): This should memoize its results if the package has not changed.
 	// Consider that these points, in combination with the note below about
-	// races, suggest that gc_details should be tracked on the Snapshot.
-	var toGCDetail map[metadata.PackageID]*metadata.Package
+	// races, suggest that compiler optimization details should be tracked on the Snapshot.
+	var detailPkgs map[metadata.PackageID]*metadata.Package
 	for _, mp := range toDiagnose {
-		if snapshot.WantGCDetails(mp.ID) {
-			if toGCDetail == nil {
-				toGCDetail = make(map[metadata.PackageID]*metadata.Package)
+		if snapshot.WantCompilerOptDetails(mp.ID) {
+			if detailPkgs == nil {
+				detailPkgs = make(map[metadata.PackageID]*metadata.Package)
 			}
-			toGCDetail[mp.ID] = mp
+			detailPkgs[mp.ID] = mp
 		}
 	}
 
 	diagnostics := make(diagMap)
-	for _, mp := range toGCDetail {
-		gcReports, err := golang.GCOptimizationDetails(ctx, snapshot, mp)
+	for _, mp := range detailPkgs {
+		perFileDiags, err := golang.CompilerOptDetails(ctx, snapshot, mp)
 		if err != nil {
-			event.Error(ctx, "warning: gc details", err, append(snapshot.Labels(), label.Package.Of(string(mp.ID)))...)
+			event.Error(ctx, "warning: compiler optimization details", err, append(snapshot.Labels(), label.Package.Of(string(mp.ID)))...)
 			continue
 		}
-		for uri, diags := range gcReports {
+		for uri, diags := range perFileDiags {
 			diagnostics[uri] = append(diagnostics[uri], diags...)
 		}
 	}

@@ -16,22 +16,6 @@ import (
 	"golang.org/x/tools/gopls/internal/util/frob"
 )
 
-type Annotation string
-
-const (
-	// Nil controls nil checks.
-	Nil Annotation = "nil"
-
-	// Escape controls diagnostics about escape choices.
-	Escape Annotation = "escape"
-
-	// Inline controls diagnostics about inlining choices.
-	Inline Annotation = "inline"
-
-	// Bounds controls bounds checking diagnostics.
-	Bounds Annotation = "bounds"
-)
-
 // Options holds various configuration that affects Gopls execution, organized
 // by the nature or origin of the settings.
 //
@@ -69,6 +53,7 @@ type ClientOptions struct {
 	PreferredContentFormat                     protocol.MarkupKind
 	LineFoldingOnly                            bool
 	HierarchicalDocumentSymbolSupport          bool
+	ImportsSource                              ImportsSourceEnum `status:"experimental"`
 	SemanticTypes                              []string
 	SemanticMods                               []string
 	RelatedInformationSupported                bool
@@ -175,7 +160,6 @@ type UIOptions struct {
 	// ...
 	//   "codelenses": {
 	//     "generate": false,  // Don't show the `go generate` lens.
-	//     "gc_details": true  // Show a code lens toggling the display of gc's choices.
 	//   }
 	// ...
 	// }
@@ -209,25 +193,6 @@ type CodeLensSource string
 // matches the name of one of the command.Commands returned by it,
 // but that isn't essential.)
 const (
-	// Toggle display of Go compiler optimization decisions
-	//
-	// This codelens source causes the `package` declaration of
-	// each file to be annotated with a command to toggle the
-	// state of the per-session variable that controls whether
-	// optimization decisions from the Go compiler (formerly known
-	// as "gc") should be displayed as diagnostics.
-	//
-	// Optimization decisions include:
-	// - whether a variable escapes, and how escape is inferred;
-	// - whether a nil-pointer check is implied or eliminated;
-	// - whether a function can be inlined.
-	//
-	// TODO(adonovan): this source is off by default because the
-	// annotation is annoying and because VS Code has a separate
-	// "Toggle gc details" command. Replace it with a Code Action
-	// ("Source action...").
-	CodeLensGCDetails CodeLensSource = "gc_details"
-
 	// Run `go generate`
 	//
 	// This codelens source annotates any `//go:generate` comments
@@ -441,10 +406,6 @@ type DiagnosticOptions struct {
 	// These analyses are documented on
 	// [Staticcheck's website](https://staticcheck.io/docs/checks/).
 	Staticcheck bool `status:"experimental"`
-
-	// Annotations specifies the various kinds of optimization diagnostics
-	// that should be reported by the gc_details command.
-	Annotations map[Annotation]bool `status:"experimental"`
 
 	// Vulncheck enables vulnerability scanning.
 	Vulncheck VulncheckMode `status:"experimental"`
@@ -737,6 +698,19 @@ func (s ImportShortcut) ShowDefinition() bool {
 	return s == BothShortcuts || s == DefinitionShortcut
 }
 
+// ImportsSourceEnum has legal values:
+//
+// - `off` to disable searching the file system for imports
+// - `gopls` to use the metadata graph and module cache index
+// - `goimports` for the old behavior, to be deprecated
+type ImportsSourceEnum string
+
+const (
+	ImportsSourceOff       ImportsSourceEnum = "off"
+	ImportsSourceGopls                       = "gopls"
+	ImportsSourceGoimports                   = "goimports"
+)
+
 type Matcher string
 
 const (
@@ -989,6 +963,11 @@ func (o *Options) setOne(name string, value any) error {
 		return setBool(&o.CompleteUnimported, value)
 	case "completionBudget":
 		return setDuration(&o.CompletionBudget, value)
+	case "importsSource":
+		return setEnum(&o.ImportsSource, value,
+			ImportsSourceOff,
+			ImportsSourceGopls,
+			ImportsSourceGoimports)
 	case "matcher":
 		return setEnum(&o.Matcher, value,
 			Fuzzy,
@@ -1057,7 +1036,7 @@ func (o *Options) setOne(name string, value any) error {
 		return setBoolMap(&o.Hints, value)
 
 	case "annotations":
-		return setAnnotationMap(&o.Annotations, value)
+		return deprecatedError("the 'annotations' setting was removed in gopls/v0.18.0; all compiler optimization details are now shown")
 
 	case "vulncheck":
 		return setEnum(&o.Vulncheck, value,
@@ -1073,9 +1052,7 @@ func (o *Options) setOne(name string, value any) error {
 			o.Codelenses = make(map[CodeLensSource]bool)
 		}
 		o.Codelenses = maps.Clone(o.Codelenses)
-		for source, enabled := range lensOverrides {
-			o.Codelenses[source] = enabled
-		}
+		maps.Copy(o.Codelenses, lensOverrides)
 
 		if name == "codelens" {
 			return deprecatedError("codelenses")
@@ -1310,48 +1287,6 @@ func setDuration(dest *time.Duration, value any) error {
 		return err
 	}
 	*dest = parsed
-	return nil
-}
-
-func setAnnotationMap(dest *map[Annotation]bool, value any) error {
-	all, err := asBoolMap[string](value)
-	if err != nil {
-		return err
-	}
-	if all == nil {
-		return nil
-	}
-	// Default to everything enabled by default.
-	m := make(map[Annotation]bool)
-	for k, enabled := range all {
-		var a Annotation
-		if err := setEnum(&a, k,
-			Nil,
-			Escape,
-			Inline,
-			Bounds); err != nil {
-			// In case of an error, process any legacy values.
-			switch k {
-			case "noEscape":
-				m[Escape] = false
-				return fmt.Errorf(`"noEscape" is deprecated, set "Escape: false" instead`)
-			case "noNilcheck":
-				m[Nil] = false
-				return fmt.Errorf(`"noNilcheck" is deprecated, set "Nil: false" instead`)
-
-			case "noInline":
-				m[Inline] = false
-				return fmt.Errorf(`"noInline" is deprecated, set "Inline: false" instead`)
-			case "noBounds":
-				m[Bounds] = false
-				return fmt.Errorf(`"noBounds" is deprecated, set "Bounds: false" instead`)
-			default:
-				return err
-			}
-		}
-		m[a] = enabled
-	}
-	*dest = m
 	return nil
 }
 

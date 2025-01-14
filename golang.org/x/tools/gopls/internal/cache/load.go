@@ -262,11 +262,11 @@ func (s *Snapshot) load(ctx context.Context, allowNetwork AllowNetwork, scopes .
 	s.mu.Lock()
 
 	// Assert the invariant s.packages.Get(id).m == s.meta.metadata[id].
-	s.packages.Range(func(id PackageID, ph *packageHandle) {
+	for id, ph := range s.packages.All() {
 		if s.meta.Packages[id] != ph.mp {
 			panic("inconsistent metadata")
 		}
-	})
+	}
 
 	// Compute the minimal metadata updates (for Clone)
 	// required to preserve the above invariant.
@@ -610,22 +610,6 @@ func computeLoadDiagnostics(ctx context.Context, snapshot *Snapshot, mp *metadat
 		diags = append(diags, depsDiags...)
 	}
 	return diags
-}
-
-// IsWorkspacePackage reports whether id points to a workspace package in s.
-//
-// Currently, the result depends on the current set of loaded packages, and so
-// is not guaranteed to be stable.
-func (s *Snapshot) IsWorkspacePackage(ctx context.Context, id PackageID) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	mg := s.meta
-	m := mg.Packages[id]
-	if m == nil {
-		return false
-	}
-	return isWorkspacePackageLocked(ctx, s, mg, m)
 }
 
 // isWorkspacePackageLocked reports whether p is a workspace package for the

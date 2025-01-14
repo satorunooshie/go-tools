@@ -13,7 +13,7 @@ import (
 )
 
 // UnpackRecv unpacks a receiver type expression, reporting whether it is a
-// pointer recever, along with the type name identifier and any receiver type
+// pointer receiver, along with the type name identifier and any receiver type
 // parameter identifiers.
 //
 // Copied (with modifications) from go/types.
@@ -62,19 +62,40 @@ L: // unpack receiver type
 	return
 }
 
-// NodeContains returns true if a node encloses a given position pos.
-// The end point will also be inclusive, which will to allow hovering when the
-// cursor is behind some nodes.
+// NodeContains reports whether the Pos/End range of node n encloses
+// the given position pos.
+//
+// It is inclusive of both end points, to allow hovering (etc) when
+// the cursor is immediately after a node.
+//
+// For unfortunate historical reasons, the Pos/End extent of an
+// ast.File runs from the start of its package declaration---excluding
+// copyright comments, build tags, and package documentation---to the
+// end of its last declaration, excluding any trailing comments. So,
+// as a special case, if n is an [ast.File], NodeContains uses
+// n.FileStart <= pos && pos <= n.FileEnd to report whether the
+// position lies anywhere within the file.
 //
 // Precondition: n must not be nil.
 func NodeContains(n ast.Node, pos token.Pos) bool {
-	return n.Pos() <= pos && pos <= n.End()
+	var start, end token.Pos
+	if file, ok := n.(*ast.File); ok {
+		start, end = file.FileStart, file.FileEnd // entire file
+	} else {
+		start, end = n.Pos(), n.End()
+	}
+	return start <= pos && pos <= end
 }
 
-// Equal recursively compares two nodes for structural equality,
-// ignoring fields of type [token.Pos] and [ast.Object].
-// The operands x and y may be nil. A nil slice is not equal to an empty slice.
-// The provided identical function reports whether two identifiers should be considered identical.
+// Equal reports whether two nodes are structurally equal,
+// ignoring fields of type [token.Pos], [ast.Object],
+// and [ast.Scope], and comments.
+//
+// The operands x and y may be nil.
+// A nil slice is not equal to an empty slice.
+//
+// The provided function determines whether two identifiers
+// should be considered identical.
 func Equal(x, y ast.Node, identical func(x, y *ast.Ident) bool) bool {
 	if x == nil || y == nil {
 		return x == y

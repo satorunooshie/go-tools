@@ -27,7 +27,6 @@ import (
 	"golang.org/x/tools/gopls/internal/protocol"
 	"golang.org/x/tools/gopls/internal/protocol/command"
 	"golang.org/x/tools/gopls/internal/settings"
-	"golang.org/x/tools/gopls/internal/util/typesutil"
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/imports"
 	"golang.org/x/tools/internal/typesinternal"
@@ -173,7 +172,7 @@ func (req *codeActionsRequest) addCommandAction(cmd *protocol.Command, allowReso
 	req.addAction(act)
 }
 
-// addCommandAction adds an edit-based CodeAction to the result.
+// addEditAction adds an edit-based CodeAction to the result.
 func (req *codeActionsRequest) addEditAction(title string, fixedDiagnostics []protocol.Diagnostic, changes ...protocol.DocumentChange) {
 	req.addAction(protocol.CodeAction{
 		Title:       title,
@@ -232,6 +231,7 @@ var codeActionProducers = [...]codeActionProducer{
 	{kind: settings.GoDoc, fn: goDoc, needPkg: true},
 	{kind: settings.GoFreeSymbols, fn: goFreeSymbols},
 	{kind: settings.GoTest, fn: goTest},
+	{kind: settings.GoToggleCompilerOptDetails, fn: toggleCompilerOptDetails},
 	{kind: settings.GoplsDocFeatures, fn: goplsDocFeatures},
 	{kind: settings.RefactorExtractFunction, fn: refactorExtractFunction},
 	{kind: settings.RefactorExtractMethod, fn: refactorExtractMethod},
@@ -318,8 +318,8 @@ func quickFix(ctx context.Context, req *codeActionsRequest) error {
 			path, _ := astutil.PathEnclosingInterval(req.pgf.File, start, end)
 			si := stubmethods.GetIfaceStubInfo(req.pkg.FileSet(), info, path, start)
 			if si != nil {
-				qf := typesutil.FileQualifier(req.pgf.File, si.Concrete.Obj().Pkg(), info)
-				iface := types.TypeString(si.Interface.Type(), qf)
+				qual := typesinternal.FileQualifier(req.pgf.File, si.Concrete.Obj().Pkg())
+				iface := types.TypeString(si.Interface.Type(), qual)
 				msg := fmt.Sprintf("Declare missing methods of %s", iface)
 				req.addApplyFixAction(msg, fixMissingInterfaceMethods, req.loc)
 			}
@@ -442,8 +442,10 @@ func goplsDocFeatures(ctx context.Context, req *codeActionsRequest) error {
 // See [server.commandHandler.Doc] for command implementation.
 func goDoc(ctx context.Context, req *codeActionsRequest) error {
 	_, _, title := DocFragment(req.pkg, req.pgf, req.start, req.end)
-	cmd := command.NewDocCommand(title, command.DocArgs{Location: req.loc, ShowDocument: true})
-	req.addCommandAction(cmd, false)
+	if title != "" {
+		cmd := command.NewDocCommand(title, command.DocArgs{Location: req.loc, ShowDocument: true})
+		req.addCommandAction(cmd, false)
+	}
 	return nil
 }
 
@@ -649,7 +651,7 @@ func refactorRewriteChangeQuote(ctx context.Context, req *codeActionsRequest) er
 	return nil
 }
 
-// refactorRewriteChangeQuote produces "Invert 'if' condition" code actions.
+// refactorRewriteInvertIf produces "Invert 'if' condition" code actions.
 // See [invertIfCondition] for command implementation.
 func refactorRewriteInvertIf(ctx context.Context, req *codeActionsRequest) error {
 	if _, ok, _ := canInvertIfCondition(req.pgf.File, req.start, req.end); ok {
@@ -870,5 +872,13 @@ func goAssembly(ctx context.Context, req *codeActionsRequest) error {
 			}
 		}
 	}
+	return nil
+}
+
+// toggleCompilerOptDetails produces "Toggle compiler optimization details" code action.
+// See [server.commandHandler.ToggleCompilerOptDetails] for command implementation.
+func toggleCompilerOptDetails(ctx context.Context, req *codeActionsRequest) error {
+	cmd := command.NewGCDetailsCommand("Toggle compiler optimization details", req.fh.URI())
+	req.addCommandAction(cmd, false)
 	return nil
 }

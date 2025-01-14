@@ -125,10 +125,6 @@ type Snapshot struct {
 	// It may invalidated when a file's content changes.
 	files *fileMap
 
-	// symbolizeHandles maps each file URI to a handle for the future
-	// result of computing the symbols declared in that file.
-	symbolizeHandles *persistent.Map[protocol.DocumentURI, *memoize.Promise] // *memoize.Promise[symbolizeResult]
-
 	// packages maps a packageKey to a *packageHandle.
 	// It may be invalidated when a file's content changes.
 	//
@@ -187,9 +183,9 @@ type Snapshot struct {
 	// vulns maps each go.mod file's URI to its known vulnerabilities.
 	vulns *persistent.Map[protocol.DocumentURI, *vulncheck.Result]
 
-	// gcOptimizationDetails describes the packages for which we want
-	// optimization details to be included in the diagnostics.
-	gcOptimizationDetails map[metadata.PackageID]unit
+	// compilerOptDetails describes the packages for which we want
+	// compiler optimization details to be included in the diagnostics.
+	compilerOptDetails map[metadata.PackageID]unit
 
 	// Concurrent type checking:
 	// typeCheckMu guards the ongoing type checking batch, and reference count of
@@ -236,7 +232,6 @@ func (s *Snapshot) decref() {
 	if s.refcount == 0 {
 		s.packages.Destroy()
 		s.files.destroy()
-		s.symbolizeHandles.Destroy()
 		s.parseModHandles.Destroy()
 		s.parseWorkHandles.Destroy()
 		s.modTidyHandles.Destroy()
@@ -349,11 +344,11 @@ func (s *Snapshot) Templates() map[protocol.DocumentURI]file.Handle {
 	defer s.mu.Unlock()
 
 	tmpls := map[protocol.DocumentURI]file.Handle{}
-	s.files.foreach(func(k protocol.DocumentURI, fh file.Handle) {
+	for k, fh := range s.files.all() {
 		if s.FileKind(fh) == file.Tmpl {
 			tmpls[k] = fh
 		}
-	})
+	}
 	return tmpls
 }
 
@@ -525,6 +520,7 @@ const (
 	exportDataKind  = "export"
 	diagnosticsKind = "diagnostics"
 	typerefsKind    = "typerefs"
+	symbolsKind     = "symbols"
 )
 
 // PackageDiagnostics returns diagnostics for files contained in specified
@@ -868,13 +864,13 @@ func (s *Snapshot) addKnownSubdirs(patterns map[protocol.RelativePattern]unit, w
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.files.getDirs().Range(func(dir string) {
+	for dir := range s.files.getDirs().All() {
 		for _, wsDir := range wsDirs {
 			if pathutil.InDir(wsDir, dir) {
 				patterns[protocol.RelativePattern{Pattern: filepath.ToSlash(dir)}] = unit{}
 			}
 		}
-	})
+	}
 }
 
 // watchSubdirs reports whether gopls should request separate file watchers for
@@ -916,11 +912,11 @@ func (s *Snapshot) filesInDir(uri protocol.DocumentURI) []protocol.DocumentURI {
 		return nil
 	}
 	var files []protocol.DocumentURI
-	s.files.foreach(func(uri protocol.DocumentURI, _ file.Handle) {
+	for uri := range s.files.all() {
 		if pathutil.InDir(dir, uri.Path()) {
 			files = append(files, uri)
 		}
-	})
+	}
 	return files
 }
 
@@ -950,9 +946,20 @@ func (s *Snapshot) WorkspaceMetadata(ctx context.Context) ([]*metadata.Package, 
 	return meta, nil
 }
 
-// isWorkspacePackage reports whether the given package ID refers to a
-// workspace package for the snapshot.
-func (s *Snapshot) isWorkspacePackage(id PackageID) bool {
+// WorkspacePackages returns the map of workspace package to package path.
+//
+// The set of workspace packages is updated after every load. A package is a
+// workspace package if and only if it is present in this map.
+func (s *Snapshot) WorkspacePackages() immutable.Map[PackageID, PackagePath] {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.workspacePackages
+}
+
+// IsWorkspacePackage reports whether the given package ID refers to a
+// workspace package for the Snapshot. It is equivalent to looking up the
+// package in [Snapshot.WorkspacePackages].
+func (s *Snapshot) IsWorkspacePackage(id PackageID) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, ok := s.workspacePackages.Value(id)
@@ -1022,13 +1029,11 @@ func (s *Snapshot) clearShouldLoad(scopes ...loadScope) {
 		case packageLoadScope:
 			scopePath := PackagePath(scope)
 			var toDelete []PackageID
-			s.shouldLoad.Range(func(id PackageID, pkgPaths []PackagePath) {
-				for _, pkgPath := range pkgPaths {
-					if pkgPath == scopePath {
-						toDelete = append(toDelete, id)
-					}
+			for id, pkgPaths := range s.shouldLoad.All() {
+				if slices.Contains(pkgPaths, scopePath) {
+					toDelete = append(toDelete, id)
 				}
-			})
+			}
 			for _, id := range toDelete {
 				s.shouldLoad.Delete(id)
 			}
@@ -1176,7 +1181,7 @@ func (s *Snapshot) reloadWorkspace(ctx context.Context) {
 	var scopes []loadScope
 	var seen map[PackagePath]bool
 	s.mu.Lock()
-	s.shouldLoad.Range(func(_ PackageID, pkgPaths []PackagePath) {
+	for _, pkgPaths := range s.shouldLoad.All() {
 		for _, pkgPath := range pkgPaths {
 			if seen == nil {
 				seen = make(map[PackagePath]bool)
@@ -1187,7 +1192,7 @@ func (s *Snapshot) reloadWorkspace(ctx context.Context) {
 			seen[pkgPath] = true
 			scopes = append(scopes, packageLoadScope(pkgPath))
 		}
-	})
+	}
 	s.mu.Unlock()
 
 	if len(scopes) == 0 {
@@ -1485,7 +1490,7 @@ func (s *Snapshot) clone(ctx, bgCtx context.Context, changed StateChange, done f
 
 	// TODO(rfindley): reorganize this function to make the derivation of
 	// needsDiagnosis clearer.
-	needsDiagnosis := len(changed.GCDetails) > 0 || len(changed.ModuleUpgrades) > 0 || len(changed.Vulns) > 0
+	needsDiagnosis := len(changed.CompilerOptDetails) > 0 || len(changed.ModuleUpgrades) > 0 || len(changed.Vulns) > 0
 
 	bgCtx, cancel := context.WithCancel(bgCtx)
 	result := &Snapshot{
@@ -1503,7 +1508,6 @@ func (s *Snapshot) clone(ctx, bgCtx context.Context, changed StateChange, done f
 		fullAnalysisKeys:  s.fullAnalysisKeys.Clone(),
 		factyAnalysisKeys: s.factyAnalysisKeys.Clone(),
 		files:             s.files.clone(changedFiles),
-		symbolizeHandles:  cloneWithout(s.symbolizeHandles, changedFiles, nil),
 		workspacePackages: s.workspacePackages,
 		shouldLoad:        s.shouldLoad.Clone(),      // not cloneWithout: shouldLoad is cleared on loads
 		unloadableFiles:   s.unloadableFiles.Clone(), // not cloneWithout: typing in a file doesn't necessarily make it loadable
@@ -1516,22 +1520,22 @@ func (s *Snapshot) clone(ctx, bgCtx context.Context, changed StateChange, done f
 		vulns:             cloneWith(s.vulns, changed.Vulns),
 	}
 
-	// Compute the new set of packages for which we want gc details, after
-	// applying changed.GCDetails.
-	if len(s.gcOptimizationDetails) > 0 || len(changed.GCDetails) > 0 {
-		newGCDetails := make(map[metadata.PackageID]unit)
-		for id := range s.gcOptimizationDetails {
-			if _, ok := changed.GCDetails[id]; !ok {
-				newGCDetails[id] = unit{} // no change
+	// Compute the new set of packages for which we want compiler
+	// optimization details, after applying changed.CompilerOptDetails.
+	if len(s.compilerOptDetails) > 0 || len(changed.CompilerOptDetails) > 0 {
+		newCompilerOptDetails := make(map[metadata.PackageID]unit)
+		for id := range s.compilerOptDetails {
+			if _, ok := changed.CompilerOptDetails[id]; !ok {
+				newCompilerOptDetails[id] = unit{} // no change
 			}
 		}
-		for id, want := range changed.GCDetails {
+		for id, want := range changed.CompilerOptDetails {
 			if want {
-				newGCDetails[id] = unit{}
+				newCompilerOptDetails[id] = unit{}
 			}
 		}
-		if len(newGCDetails) > 0 {
-			result.gcOptimizationDetails = newGCDetails
+		if len(newCompilerOptDetails) > 0 {
+			result.compilerOptDetails = newCompilerOptDetails
 		}
 	}
 
@@ -1880,13 +1884,13 @@ func deleteMostRelevantModFile(m *persistent.Map[protocol.DocumentURI, *memoize.
 	var mostRelevant protocol.DocumentURI
 	changedFile := changed.Path()
 
-	m.Range(func(modURI protocol.DocumentURI, _ *memoize.Promise) {
+	for modURI := range m.All() {
 		if len(modURI) > len(mostRelevant) {
 			if pathutil.InDir(modURI.DirPath(), changedFile) {
 				mostRelevant = modURI
 			}
 		}
-	})
+	}
 	if mostRelevant != "" {
 		m.Delete(mostRelevant)
 	}
@@ -2155,10 +2159,10 @@ func (s *Snapshot) setBuiltin(path string) {
 	s.builtin = protocol.URIFromPath(path)
 }
 
-// WantGCDetails reports whether to compute GC optimization details for the
-// specified package.
-func (s *Snapshot) WantGCDetails(id metadata.PackageID) bool {
-	_, ok := s.gcOptimizationDetails[id]
+// WantCompilerOptDetails reports whether to compute compiler
+// optimization details for the specified package.
+func (s *Snapshot) WantCompilerOptDetails(id metadata.PackageID) bool {
+	_, ok := s.compilerOptDetails[id]
 	return ok
 }
 

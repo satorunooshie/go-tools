@@ -39,6 +39,7 @@ func DefaultOptions(overrides ...func(*Options)) *Options {
 				DynamicWatchedFilesSupported:               true,
 				LineFoldingOnly:                            false,
 				HierarchicalDocumentSymbolSupport:          true,
+				ImportsSource:                              ImportsSourceGopls,
 			},
 			ServerOptions: ServerOptions{
 				SupportedCodeActions: map[file.Kind]map[protocol.CodeActionKind]bool{
@@ -89,12 +90,6 @@ func DefaultOptions(overrides ...func(*Options)) *Options {
 				},
 				UIOptions: UIOptions{
 					DiagnosticOptions: DiagnosticOptions{
-						Annotations: map[Annotation]bool{
-							Bounds: true,
-							Escape: true,
-							Inline: true,
-							Nil:    true,
-						},
 						Vulncheck:                 ModeVulncheckOff,
 						DiagnosticsDelay:          1 * time.Second,
 						DiagnosticsTrigger:        DiagnosticsOnEdit,
@@ -122,7 +117,6 @@ func DefaultOptions(overrides ...func(*Options)) *Options {
 						CodeLensGenerate:          true,
 						CodeLensRegenerateCgo:     true,
 						CodeLensTidy:              true,
-						CodeLensGCDetails:         false,
 						CodeLensUpgradeDependency: true,
 						CodeLensVendor:            true,
 						CodeLensRunGovulncheck:    false, // TODO(hyangah): enable

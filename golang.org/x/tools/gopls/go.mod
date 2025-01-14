@@ -1,16 +1,16 @@
 module golang.org/x/tools/gopls
 
-// go 1.23.1 fixes some bugs in go/types Alias support.
-// (golang/go#68894 and golang/go#68905).
-go 1.23.1
+// go 1.23.1 fixes some bugs in go/types Alias support (golang/go#68894, golang/go#68905).
+// go 1.23.4 fixes a miscompilation of range-over-func (golang/go#70035).
+go 1.23.4
 
 require (
 	github.com/google/go-cmp v0.6.0
 	github.com/jba/templatecheck v0.7.1
 	golang.org/x/mod v0.22.0
 	golang.org/x/sync v0.10.0
-	golang.org/x/sys v0.28.0
-	golang.org/x/telemetry v0.0.0-20241212155558-b40c91e7e8c7
+	golang.org/x/sys v0.29.0
+	golang.org/x/telemetry v0.0.0-20241220003058-cc96b6e0d3d9
 	golang.org/x/text v0.21.0
 	golang.org/x/tools v0.28.0
 	golang.org/x/vuln v1.1.3

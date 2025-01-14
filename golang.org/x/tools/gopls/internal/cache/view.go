@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"os"
 	"os/exec"
 	"path"
@@ -106,7 +107,11 @@ type View struct {
 	// background contexts created for this view.
 	baseCtx context.Context
 
+	// importsState is for the old imports code
 	importsState *importsState
+
+	// maintain the current module cache index
+	modcacheState *modcacheState
 
 	// pkgIndex is an index of package IDs, for efficient storage of typerefs.
 	pkgIndex *typerefs.PackageIndex
@@ -736,11 +741,11 @@ func (s *Snapshot) initialize(ctx context.Context, firstAttempt bool) {
 // By far the most common of these is a change to file state, but a query of
 // module upgrade information or vulnerabilities also affects gopls' behavior.
 type StateChange struct {
-	Modifications  []file.Modification // if set, the raw modifications originating this change
-	Files          map[protocol.DocumentURI]file.Handle
-	ModuleUpgrades map[protocol.DocumentURI]map[string]string
-	Vulns          map[protocol.DocumentURI]*vulncheck.Result
-	GCDetails      map[metadata.PackageID]bool // package -> whether or not we want details
+	Modifications      []file.Modification // if set, the raw modifications originating this change
+	Files              map[protocol.DocumentURI]file.Handle
+	ModuleUpgrades     map[protocol.DocumentURI]map[string]string
+	Vulns              map[protocol.DocumentURI]*vulncheck.Result
+	CompilerOptDetails map[metadata.PackageID]bool // package -> whether or not we want details
 }
 
 // InvalidateView processes the provided state change, invalidating any derived
@@ -809,9 +814,10 @@ func (s *Session) invalidateViewLocked(ctx context.Context, v *View, changed Sta
 // If forURI is non-empty, this view should be the best view including forURI.
 // Otherwise, it is the default view for the folder.
 //
-// defineView only returns an error in the event of context cancellation.
+// defineView may return an error if the context is cancelled, or the
+// workspace folder path is invalid.
 //
-// Note: keep this function in sync with bestView.
+// Note: keep this function in sync with [RelevantViews].
 //
 // TODO(rfindley): we should be able to remove the error return, as
 // findModules is going away, and all other I/O is memoized.
@@ -838,11 +844,11 @@ func defineView(ctx context.Context, fs file.Source, folder *Folder, forFile fil
 		// add those constraints to the viewDefinition's environment.
 
 		// Content trimming is nontrivial, so do this outside of the loop below.
-		// Keep this in sync with bestView.
+		// Keep this in sync with [RelevantViews].
 		path := forFile.URI().Path()
 		if content, err := forFile.Content(); err == nil {
 			// Note the err == nil condition above: by convention a non-existent file
-			// does not have any constraints. See the related note in bestView: this
+			// does not have any constraints. See the related note in [RelevantViews]: this
 			// choice of behavior shouldn't actually matter. In this case, we should
 			// only call defineView with Overlays, which always have content.
 			content = trimContentForPortMatch(content)
@@ -1142,9 +1148,7 @@ func (s *Snapshot) ModuleUpgrades(modfile protocol.DocumentURI) map[string]strin
 	defer s.mu.Unlock()
 	upgrades := map[string]string{}
 	orig, _ := s.moduleUpgrades.Get(modfile)
-	for mod, ver := range orig {
-		upgrades[mod] = ver
-	}
+	maps.Copy(upgrades, orig)
 	return upgrades
 }
 
@@ -1170,7 +1174,7 @@ func (s *Snapshot) Vulnerabilities(modfiles ...protocol.DocumentURI) map[protoco
 	defer s.mu.Unlock()
 
 	if len(modfiles) == 0 { // empty means all modfiles
-		modfiles = s.vulns.Keys()
+		modfiles = slices.Collect(s.vulns.Keys())
 	}
 	for _, modfile := range modfiles {
 		vuln, _ := s.vulns.Get(modfile)

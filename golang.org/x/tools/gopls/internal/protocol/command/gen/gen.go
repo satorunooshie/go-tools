@@ -53,7 +53,7 @@ var Commands = []Command {
 {{- end}}
 }
 
-func Dispatch(ctx context.Context, params *protocol.ExecuteCommandParams, s Interface) (interface{}, error) {
+func Dispatch(ctx context.Context, params *protocol.ExecuteCommandParams, s Interface) (any, error) {
 	switch Command(params.Command) {
 	{{- range .Commands}}
 	case {{.MethodName}}:
@@ -110,7 +110,7 @@ func Generate() ([]byte, error) {
 		return nil, fmt.Errorf("loading command data: %v", err)
 	}
 	const thispkg = "golang.org/x/tools/gopls/internal/protocol/command"
-	qf := func(p *types.Package) string {
+	qual := func(p *types.Package) string {
 		if p.Path() == thispkg {
 			return ""
 		}
@@ -118,7 +118,7 @@ func Generate() ([]byte, error) {
 	}
 	tmpl, err := template.New("").Funcs(template.FuncMap{
 		"typeString": func(t types.Type) string {
-			return types.TypeString(t, qf)
+			return types.TypeString(t, qual)
 		},
 		"fallible": func(args []*commandmeta.Field) bool {
 			var fallible func(types.Type) bool

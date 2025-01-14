@@ -290,6 +290,31 @@ Default: on.
 
 Package documentation: [framepointer](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/framepointer)
 
+<a id='hostport'></a>
+## `hostport`: check format of addresses passed to net.Dial
+
+
+This analyzer flags code that produce network address strings using
+fmt.Sprintf, as in this example:
+
+    addr := fmt.Sprintf("%s:%d", host, 12345) // "will not work with IPv6"
+    ...
+    conn, err := net.Dial("tcp", addr)       // "when passed to dial here"
+
+The analyzer suggests a fix to use the correct approach, a call to
+net.JoinHostPort:
+
+    addr := net.JoinHostPort(host, "12345")
+    ...
+    conn, err := net.Dial("tcp", addr)
+
+A similar diagnostic and fix are produced for a format string of "%s:%s".
+
+
+Default: on.
+
+Package documentation: [hostport](https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/hostport)
+
 <a id='httpresponse'></a>
 ## `httpresponse`: check for mistakes using HTTP responses
 
@@ -435,6 +460,32 @@ or the new context will remain live until its parent context is cancelled.
 Default: on.
 
 Package documentation: [lostcancel](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/lostcancel)
+
+<a id='modernize'></a>
+## `modernize`: simplify code by using modern constructs
+
+
+This analyzer reports opportunities for simplifying and clarifying
+existing code by using more modern features of Go, such as:
+
+  - replacing an if/else conditional assignment by a call to the
+    built-in min or max functions added in go1.21;
+  - replacing sort.Slice(x, func(i, j int) bool) { return s[i] < s[j] }
+    by a call to slices.Sort(s), added in go1.21;
+  - replacing interface{} by the 'any' type added in go1.18;
+  - replacing append([]T(nil), s...) by slices.Clone(s) or
+    slices.Concat(s), added in go1.21;
+  - replacing a loop around an m[k]=v map update by a call
+    to one of the Collect, Copy, Clone, or Insert functions
+    from the maps package, added in go1.21;
+  - replacing []byte(fmt.Sprintf...) by fmt.Appendf(nil, ...),
+    added in go1.19;
+  - replacing uses of context.WithCancel in tests with t.Context, added in
+    go1.24;
+
+Default: on.
+
+Package documentation: [modernize](https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/modernize)
 
 <a id='nilfunc'></a>
 ## `nilfunc`: check for useless comparisons between functions and nil
@@ -879,6 +930,37 @@ Default: on.
 
 Package documentation: [unsafeptr](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/unsafeptr)
 
+<a id='unusedfunc'></a>
+## `unusedfunc`: check for unused functions and methods
+
+
+The unusedfunc analyzer reports functions and methods that are
+never referenced outside of their own declaration.
+
+A function is considered unused if it is unexported and not
+referenced (except within its own declaration).
+
+A method is considered unused if it is unexported, not referenced
+(except within its own declaration), and its name does not match
+that of any method of an interface type declared within the same
+package.
+
+The tool may report a false positive for a declaration of an
+unexported function that is referenced from another package using
+the go:linkname mechanism, if the declaration's doc comment does
+not also have a go:linkname comment. (Such code is in any case
+strongly discouraged: linkname annotations, if they must be used at
+all, should be used on both the declaration and the alias.)
+
+The unusedfunc algorithm is not as precise as the
+golang.org/x/tools/cmd/deadcode tool, but it has the advantage that
+it runs within the modular analysis framework, enabling near
+real-time feedback within gopls.
+
+Default: on.
+
+Package documentation: [unusedfunc](https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/unusedfunc)
+
 <a id='unusedparams'></a>
 ## `unusedparams`: check for unused parameters of functions
 
@@ -931,7 +1013,7 @@ Package documentation: [unusedresult](https://pkg.go.dev/golang.org/x/tools/go/a
 
 
 
-Default: off. Enable by setting `"analyses": {"unusedvariable": true}`.
+Default: on.
 
 Package documentation: [unusedvariable](https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/unusedvariable)
 
@@ -966,15 +1048,6 @@ Another example is about non-pointer receiver:
 Default: on.
 
 Package documentation: [unusedwrite](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/unusedwrite)
-
-<a id='useany'></a>
-## `useany`: check for constraints that could be simplified to "any"
-
-
-
-Default: off. Enable by setting `"analyses": {"useany": true}`.
-
-Package documentation: [useany](https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/useany)
 
 <a id='waitgroup'></a>
 ## `waitgroup`: check for misuses of sync.WaitGroup
