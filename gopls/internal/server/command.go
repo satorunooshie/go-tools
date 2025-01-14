@@ -683,15 +683,6 @@ func dropDependency(pm *cache.ParsedModule, modulePath string) ([]protocol.TextE
 	return protocol.EditsFromDiffEdits(pm.Mapper, diff)
 }
 
-// Test is an alias for RunTests (with splayed arguments).
-func (c *commandHandler) Test(ctx context.Context, uri protocol.DocumentURI, tests, benchmarks []string) error {
-	return c.RunTests(ctx, command.RunTestsArgs{
-		URI:        uri,
-		Tests:      tests,
-		Benchmarks: benchmarks,
-	})
-}
-
 func (c *commandHandler) Doc(ctx context.Context, args command.DocArgs) (protocol.URI, error) {
 	if args.Location.URI == "" {
 		return "", errors.New("missing location URI")
@@ -1026,19 +1017,22 @@ func (s *server) getUpgrades(ctx context.Context, snapshot *cache.Snapshot, uri 
 
 func (c *commandHandler) GCDetails(ctx context.Context, uri protocol.DocumentURI) error {
 	return c.run(ctx, commandConfig{
-		progress: "Toggling display of compiler optimization details",
-		forURI:   uri,
+		forURI: uri,
 	}, func(ctx context.Context, deps commandDeps) error {
 		return c.modifyState(ctx, FromToggleCompilerOptDetails, func() (*cache.Snapshot, func(), error) {
+			// Don't blindly use "dir := deps.fh.URI().Dir()"; validate.
 			meta, err := golang.NarrowestMetadataForFile(ctx, deps.snapshot, deps.fh.URI())
 			if err != nil {
 				return nil, nil, err
 			}
-			want := !deps.snapshot.WantCompilerOptDetails(meta.ID) // toggle per-package flag
+			if len(meta.CompiledGoFiles) == 0 {
+				return nil, nil, fmt.Errorf("package %q does not compile file %q", meta.ID, deps.fh.URI())
+			}
+			dir := meta.CompiledGoFiles[0].Dir()
+
+			want := !deps.snapshot.WantCompilerOptDetails(dir) // toggle per-directory flag
 			return c.s.session.InvalidateView(ctx, deps.snapshot.View(), cache.StateChange{
-				CompilerOptDetails: map[metadata.PackageID]bool{
-					meta.ID: want,
-				},
+				CompilerOptDetails: map[protocol.DocumentURI]bool{dir: want},
 			})
 		})
 	})
