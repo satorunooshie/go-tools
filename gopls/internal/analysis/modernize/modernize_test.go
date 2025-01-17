@@ -19,7 +19,9 @@ func Test(t *testing.T) {
 		"fmtappendf",
 		"mapsloop",
 		"minmax",
+		"omitzero",
 		"slicescontains",
+		"slicesdelete",
 		"sortslice",
 		"testingcontext",
 	)
