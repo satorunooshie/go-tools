@@ -280,12 +280,13 @@ func hover(ctx context.Context, snapshot *cache.Snapshot, fh file.Handle, pp pro
 	//
 	// There's not much useful information to provide.
 	if selectedType != nil {
-		fakeObj := types.NewVar(obj.Pos(), obj.Pkg(), obj.Name(), selectedType)
-		signature := types.ObjectString(fakeObj, qual)
+		v := types.NewVar(obj.Pos(), obj.Pkg(), obj.Name(), selectedType)
+		typesinternal.SetVarKind(v, typesinternal.LocalVar)
+		signature := types.ObjectString(v, qual)
 		return *hoverRange, &hoverResult{
 			signature:  signature,
 			singleLine: signature,
-			symbolName: fakeObj.Name(),
+			symbolName: v.Name(),
 		}, nil
 	}
 
@@ -587,13 +588,13 @@ func hover(ctx context.Context, snapshot *cache.Snapshot, fh file.Handle, pp pro
 			pkg := obj.Pkg()
 			if recv != nil {
 				linkName = fmt.Sprintf("(%s.%s).%s", pkg.Name(), recv.Name(), obj.Name())
-				if obj.Exported() && recv.Exported() && isPackageLevel(recv) {
+				if obj.Exported() && recv.Exported() && typesinternal.IsPackageLevel(recv) {
 					linkPath = pkg.Path()
 					anchor = fmt.Sprintf("%s.%s", recv.Name(), obj.Name())
 				}
 			} else {
 				linkName = fmt.Sprintf("%s.%s", pkg.Name(), obj.Name())
-				if obj.Exported() && isPackageLevel(obj) {
+				if obj.Exported() && typesinternal.IsPackageLevel(obj) {
 					linkPath = pkg.Path()
 					anchor = obj.Name()
 				}
@@ -1333,7 +1334,7 @@ func StdSymbolOf(obj types.Object) *stdlib.Symbol {
 	}
 
 	// Handle Function, Type, Const & Var.
-	if isPackageLevel(obj) {
+	if obj != nil && typesinternal.IsPackageLevel(obj) {
 		for _, s := range symbols {
 			if s.Kind == stdlib.Method || s.Kind == stdlib.Field {
 				continue
@@ -1348,7 +1349,7 @@ func StdSymbolOf(obj types.Object) *stdlib.Symbol {
 	// Handle Method.
 	if fn, _ := obj.(*types.Func); fn != nil {
 		isPtr, named := typesinternal.ReceiverNamed(fn.Signature().Recv())
-		if named != nil && isPackageLevel(named.Obj()) {
+		if named != nil && typesinternal.IsPackageLevel(named.Obj()) {
 			for _, s := range symbols {
 				if s.Kind != stdlib.Method {
 					continue
