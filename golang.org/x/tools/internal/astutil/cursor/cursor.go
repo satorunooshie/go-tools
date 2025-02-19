@@ -407,6 +407,8 @@ func (c Cursor) FindNode(n ast.Node) (Cursor, bool) {
 
 // FindPos returns the cursor for the innermost node n in the tree
 // rooted at c such that n.Pos() <= start && end <= n.End().
+// (For an *ast.File, it uses the bounds n.FileStart-n.FileEnd.)
+//
 // It returns zero if none is found.
 // Precondition: start <= end.
 //
@@ -425,10 +427,22 @@ func (c Cursor) FindPos(start, end token.Pos) (Cursor, bool) {
 	for i, limit := c.indices(); i < limit; i++ {
 		ev := events[i]
 		if ev.index > i { // push?
-			if ev.node.Pos() > start {
-				break // disjoint, after; stop
+			n := ev.node
+			var nodeEnd token.Pos
+			if file, ok := n.(*ast.File); ok {
+				nodeEnd = file.FileEnd
+				// Note: files may be out of Pos order.
+				if file.FileStart > start {
+					i = ev.index // disjoint, after; skip to next file
+					continue
+				}
+			} else {
+				nodeEnd = n.End()
+				if n.Pos() > start {
+					break // disjoint, after; stop
+				}
 			}
-			nodeEnd := ev.node.End()
+			// Inv: node.{Pos,FileStart} <= start
 			if end <= nodeEnd {
 				// node fully contains target range
 				best = i
