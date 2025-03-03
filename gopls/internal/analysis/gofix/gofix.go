@@ -9,6 +9,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"slices"
 	"strings"
 
 	_ "embed"
@@ -33,7 +34,20 @@ var Analyzer = &analysis.Analyzer{
 	Name: "gofix",
 	Doc:  analysisinternal.MustExtractDoc(doc, "gofix"),
 	URL:  "https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/gofix",
-	Run:  run,
+	Run:  func(pass *analysis.Pass) (any, error) { return run(pass, true) },
+	FactTypes: []analysis.Fact{
+		(*goFixInlineFuncFact)(nil),
+		(*goFixInlineConstFact)(nil),
+		(*goFixInlineAliasFact)(nil),
+	},
+	Requires: []*analysis.Analyzer{inspect.Analyzer},
+}
+
+var DirectiveAnalyzer = &analysis.Analyzer{
+	Name: "gofixdirective",
+	Doc:  analysisinternal.MustExtractDoc(doc, "gofixdirective"),
+	URL:  "https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/gofix",
+	Run:  func(pass *analysis.Pass) (any, error) { return run(pass, false) },
 	FactTypes: []analysis.Fact{
 		(*goFixInlineFuncFact)(nil),
 		(*goFixInlineConstFact)(nil),
@@ -45,6 +59,7 @@ var Analyzer = &analysis.Analyzer{
 // analyzer holds the state for this analysis.
 type analyzer struct {
 	pass *analysis.Pass
+	fix  bool // only suggest fixes if true; else, just check directives
 	root cursor.Cursor
 	// memoization of repeated calls for same file.
 	fileContent map[string][]byte
@@ -54,9 +69,10 @@ type analyzer struct {
 	inlinableAliases map[*types.TypeName]*goFixInlineAliasFact
 }
 
-func run(pass *analysis.Pass) (any, error) {
+func run(pass *analysis.Pass, fix bool) (any, error) {
 	a := &analyzer{
 		pass:             pass,
+		fix:              fix,
 		root:             cursor.Root(pass.ResultOf[inspect.Analyzer].(*inspector.Inspector)),
 		fileContent:      make(map[string][]byte),
 		inlinableFuncs:   make(map[*types.Func]*inline.Callee),
@@ -132,17 +148,15 @@ func (a *analyzer) findAlias(spec *ast.TypeSpec, declInline bool) {
 	//    type A = [N]int
 	//
 	// would result in [5]int, breaking the connection with N.
-	// TODO(jba): accept type expressions where the array size is a literal integer
 	for n := range ast.Preorder(spec.Type) {
 		if ar, ok := n.(*ast.ArrayType); ok && ar.Len != nil {
+			// Make an exception when the array length is a literal int.
+			if lit, ok := ast.Unparen(ar.Len).(*ast.BasicLit); ok && lit.Kind == token.INT {
+				continue
+			}
 			a.pass.Reportf(spec.Pos(), "invalid //go:fix inline directive: array types not supported")
 			return
 		}
-	}
-
-	if spec.TypeParams != nil {
-		// TODO(jba): handle generic aliases
-		return
 	}
 
 	// Remember that this is an inlinable alias.
@@ -260,6 +274,10 @@ func (a *analyzer) inlineCall(call *ast.CallExpr, cur cursor.Cursor) {
 			a.pass.Reportf(call.Lparen, "%v", err)
 			return
 		}
+		if !a.fix {
+			return
+		}
+
 		if res.Literalized {
 			// Users are not fond of inlinings that literalize
 			// f(x) to func() { ... }(), so avoid them.
@@ -294,7 +312,7 @@ func (a *analyzer) inlineCall(call *ast.CallExpr, cur cursor.Cursor) {
 }
 
 // If tn is the TypeName of an inlinable alias, suggest inlining its use at cur.
-func (a *analyzer) inlineAlias(tn *types.TypeName, cur cursor.Cursor) {
+func (a *analyzer) inlineAlias(tn *types.TypeName, curId cursor.Cursor) {
 	inalias, ok := a.inlinableAliases[tn]
 	if !ok {
 		var fact goFixInlineAliasFact
@@ -307,12 +325,17 @@ func (a *analyzer) inlineAlias(tn *types.TypeName, cur cursor.Cursor) {
 		return // nope
 	}
 
-	// Get the alias's RHS. It has everything we need to format the replacement text.
-	rhs := tn.Type().(*types.Alias).Rhs()
-
+	alias := tn.Type().(*types.Alias)
+	// Remember the names of the alias's type params. When we check for shadowing
+	// later, we'll ignore these because they won't appear in the replacement text.
+	typeParamNames := map[*types.TypeName]bool{}
+	for tp := range alias.TypeParams().TypeParams() {
+		typeParamNames[tp.Obj()] = true
+	}
+	rhs := alias.Rhs()
 	curPath := a.pass.Pkg.Path()
-	curFile := currentFile(cur)
-	n := cur.Node().(*ast.Ident)
+	curFile := currentFile(curId)
+	id := curId.Node().(*ast.Ident)
 	// We have an identifier A here (n), possibly qualified by a package
 	// identifier (sel.n), and an inlinable "type A = rhs" elsewhere.
 	//
@@ -324,6 +347,10 @@ func (a *analyzer) inlineAlias(tn *types.TypeName, cur cursor.Cursor) {
 		edits          []analysis.TextEdit
 	)
 	for _, tn := range typenames(rhs) {
+		// Ignore the type parameters of the alias: they won't appear in the result.
+		if typeParamNames[tn] {
+			continue
+		}
 		var pkgPath, pkgName string
 		if pkg := tn.Pkg(); pkg != nil {
 			pkgPath = pkg.Path()
@@ -333,9 +360,9 @@ func (a *analyzer) inlineAlias(tn *types.TypeName, cur cursor.Cursor) {
 			// The name is in the current package or the universe scope, so no import
 			// is required. Check that it is not shadowed (that is, that the type
 			// it refers to in rhs is the same one it refers to at n).
-			scope := a.pass.TypesInfo.Scopes[curFile].Innermost(n.Pos()) // n's scope
-			_, obj := scope.LookupParent(tn.Name(), n.Pos())             // what qn.name means in n's scope
-			if obj != tn {                                               // shadowed
+			scope := a.pass.TypesInfo.Scopes[curFile].Innermost(id.Pos()) // n's scope
+			_, obj := scope.LookupParent(tn.Name(), id.Pos())             // what qn.name means in n's scope
+			if obj != tn {
 				return
 			}
 		} else if !analysisinternal.CanImport(a.pass.Pkg.Path(), pkgPath) {
@@ -345,15 +372,40 @@ func (a *analyzer) inlineAlias(tn *types.TypeName, cur cursor.Cursor) {
 			// Use AddImport to add pkgPath if it's not there already. Associate the prefix it assigns
 			// with the package path for use by the TypeString qualifier below.
 			_, prefix, eds := analysisinternal.AddImport(
-				a.pass.TypesInfo, curFile, pkgName, pkgPath, tn.Name(), n.Pos())
+				a.pass.TypesInfo, curFile, pkgName, pkgPath, tn.Name(), id.Pos())
 			importPrefixes[pkgPath] = strings.TrimSuffix(prefix, ".")
 			edits = append(edits, eds...)
 		}
 	}
-	// If n is qualified by a package identifier, we'll need the full selector expression.
-	var expr ast.Expr = n
-	if e, _ := cur.Edge(); e == edge.SelectorExpr_Sel {
-		expr = cur.Parent().Node().(ast.Expr)
+	// Find the complete identifier, which may take any of these forms:
+	//       Id
+	//       Id[T]
+	//       Id[K, V]
+	//   pkg.Id
+	//   pkg.Id[T]
+	//   pkg.Id[K, V]
+	var expr ast.Expr = id
+	if e, _ := curId.Edge(); e == edge.SelectorExpr_Sel {
+		curId = curId.Parent()
+		expr = curId.Node().(ast.Expr)
+	}
+	// If expr is part of an IndexExpr or IndexListExpr, we'll need that node.
+	// Given C[int], TypeOf(C) is generic but TypeOf(C[int]) is instantiated.
+	switch ek, _ := curId.Edge(); ek {
+	case edge.IndexExpr_X:
+		expr = curId.Parent().Node().(*ast.IndexExpr)
+	case edge.IndexListExpr_X:
+		expr = curId.Parent().Node().(*ast.IndexListExpr)
+	}
+	t := a.pass.TypesInfo.TypeOf(expr).(*types.Alias) // type of entire identifier
+	if targs := t.TypeArgs(); targs.Len() > 0 {
+		// Instantiate the alias with the type args from this use.
+		// For example, given type A = M[K, V], compute the type of the use
+		// A[int, Foo] as M[int, Foo].
+		// Don't validate instantiation: it can't panic unless we have a bug,
+		// in which case seeing the stack trace via telemetry would be helpful.
+		instAlias, _ := types.Instantiate(nil, alias, slices.Collect(targs.Types()), false)
+		rhs = instAlias.(*types.Alias).Rhs()
 	}
 	// To get the replacement text, render the alias RHS using the package prefixes
 	// we assigned above.
@@ -503,6 +555,9 @@ func (a *analyzer) inlineConst(con *types.Const, cur cursor.Cursor) {
 
 // reportInline reports a diagnostic for fixing an inlinable name.
 func (a *analyzer) reportInline(kind, capKind string, ident ast.Expr, edits []analysis.TextEdit, newText string) {
+	if !a.fix {
+		return
+	}
 	edits = append(edits, analysis.TextEdit{
 		Pos:     ident.Pos(),
 		End:     ident.End(),
