@@ -129,6 +129,13 @@ type E = map[[Uno]string][]*T // want `invalid //go:fix inline directive: array 
 
 var _ E // nothing should happen here
 
+// literal array lengths are OK
+//
+//go:fix inline
+type EL = map[[2]string][]*T // want EL: `goFixInline alias`
+
+var _ EL // want `Type alias EL should be inlined`
+
 //go:fix inline
 type F = map[internal.T]T // want F: `goFixInline alias`
 
@@ -163,4 +170,26 @@ func _[P any]() {
 
 	_ = x
 	_ = y
+}
+
+// generic type aliases
+
+//go:fix inline
+type (
+	Mapset[T comparable] = map[T]bool // want Mapset: `goFixInline alias`
+	Pair[X, Y any]       = struct {   // want Pair: `goFixInline alias`
+		X X
+		Y Y
+	}
+)
+
+var _ Mapset[int] // want `Type alias Mapset\[int\] should be inlined`
+
+var _ Pair[T, string] // want `Type alias Pair\[T, string\] should be inlined`
+
+func _[V any]() {
+	//go:fix inline
+	type M[K comparable] = map[K]V
+
+	var _ M[int] // want `Type alias M\[int\] should be inlined`
 }
