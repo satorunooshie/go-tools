@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//go:generate go run ../../doc/generate
+//go:generate go run ./generate
 
 // The doc package provides JSON metadata that documents gopls' public
 // interfaces.
@@ -47,11 +47,13 @@ type EnumKey struct {
 	Name    string // in JSON syntax (quoted)
 	Doc     string
 	Default string
+	Status  string // = "" | "advanced" | "experimental" | "deprecated"
 }
 
 type EnumValue struct {
-	Value string // in JSON syntax (quoted)
-	Doc   string // doc comment; always starts with `Value`
+	Value  string // in JSON syntax (quoted)
+	Doc    string // doc comment; always starts with `Value`
+	Status string // = "" | "advanced" | "experimental" | "deprecated"
 }
 
 type Lens struct {
@@ -60,6 +62,7 @@ type Lens struct {
 	Title    string
 	Doc      string
 	Default  bool
+	Status   string // = "" | "advanced" | "experimental" | "deprecated"
 }
 
 type Analyzer struct {
@@ -73,4 +76,5 @@ type Hint struct {
 	Name    string
 	Doc     string
 	Default bool
+	Status  string // = "" | "advanced" | "experimental" | "deprecated"
 }
