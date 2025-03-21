@@ -131,11 +131,8 @@ func g() {
 		_ = curFunc.Node().(*ast.FuncDecl)
 
 		// Check edge and index.
-		if k := curFunc.ParentEdge(); k != edge.File_Decls {
-			t.Errorf("%v.ParentEdge() = %v,  want edge.File_Decls", curFunc, k)
-		}
-		if idx := curFunc.ParentIndex(); idx != nfuncs {
-			t.Errorf("%v.ParentIndex() = %d, want %d", curFunc, idx, nfuncs)
+		if k, idx := curFunc.ParentEdge(); k != edge.File_Decls || idx != nfuncs {
+			t.Errorf("%v.ParentEdge() = (%v, %d),  want edge.File_Decls, %d", curFunc, k, idx, nfuncs)
 		}
 
 		nfuncs++
@@ -371,8 +368,7 @@ func TestCursor_Edge(t *testing.T) {
 
 		var (
 			parent = cur.Parent()
-			e      = cur.ParentEdge()
-			idx    = cur.ParentIndex()
+			e, idx = cur.ParentEdge()
 		)
 
 		// ast.File, child of root?
@@ -395,7 +391,7 @@ func TestCursor_Edge(t *testing.T) {
 				cur, netFset.Position(cur.Node().Pos()), e, idx, got, netFset.Position(got.Pos()))
 		}
 
-		// Check c.Parent.ChildAt(c.ParentEdge, c.ParentIndex) == c.
+		// Check c.Parent.ChildAt(c.ParentEdge()) == c.
 		if got := parent.ChildAt(e, idx); got != cur {
 			t.Errorf("cur=%v@%s: cur.Parent().ChildAt(%v, %d) = %T@%s, want cur",
 				cur, netFset.Position(cur.Node().Pos()), e, idx, got.Node(), netFset.Position(got.Node().Pos()))
@@ -419,6 +415,39 @@ func TestCursor_Edge(t *testing.T) {
 		if cur.Parent().Child(cur.Node()) != cur {
 			t.Errorf("Cursor.Parent.Child = %v, want %v", cur.Parent().Child(cur.Node()), cur)
 		}
+
+		// Check invariants of Contains:
+
+		// A cursor contains itself.
+		if !cur.Contains(cur) {
+			t.Errorf("!cur.Contains(cur): %v", cur)
+		}
+		// A parent contains its child, but not the inverse.
+		if !parent.Contains(cur) {
+			t.Errorf("!cur.Parent().Contains(cur): %v", cur)
+		}
+		if cur.Contains(parent) {
+			t.Errorf("cur.Contains(cur.Parent()): %v", cur)
+		}
+		// A grandparent contains its grandchild, but not the inverse.
+		if grandparent := cur.Parent(); grandparent.Node() != nil {
+			if !grandparent.Contains(cur) {
+				t.Errorf("!cur.Parent().Parent().Contains(cur): %v", cur)
+			}
+			if cur.Contains(grandparent) {
+				t.Errorf("cur.Contains(cur.Parent().Parent()): %v", cur)
+			}
+		}
+		// A cursor and its uncle/aunt do not contain each other.
+		if uncle, ok := parent.NextSibling(); ok {
+			if uncle.Contains(cur) {
+				t.Errorf("cur.Parent().NextSibling().Contains(cur): %v", cur)
+			}
+			if cur.Contains(uncle) {
+				t.Errorf("cur.Contains(cur.Parent().NextSibling()): %v", cur)
+			}
+		}
+
 	}
 }
 
