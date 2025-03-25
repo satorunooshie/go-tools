@@ -120,7 +120,7 @@ func E3(int8) uint32
 func F1[T any](T) { panic(0) }
 func F2[T any](*T) { panic(0) }
 func F3[T any](T, T) { panic(0) }
-func F4[U any](U, *U) {panic(0) }
+func F4[U any](U, *U) { panic(0) }
 func F5[T, U any](T, U, U) { panic(0) }
 func F6[T any](T, int, T) { panic(0) }
 func F7[T any](bool, T, T) { panic(0) }
