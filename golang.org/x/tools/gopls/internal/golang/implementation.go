@@ -14,7 +14,6 @@ import (
 	"iter"
 	"reflect"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 
@@ -64,19 +63,8 @@ func Implementation(ctx context.Context, snapshot *cache.Snapshot, f file.Handle
 	if err != nil {
 		return nil, err
 	}
-
-	// Sort and de-duplicate locations.
-	sort.Slice(locs, func(i, j int) bool {
-		return protocol.CompareLocation(locs[i], locs[j]) < 0
-	})
-	out := locs[:0]
-	for _, loc := range locs {
-		if len(out) == 0 || out[len(out)-1] != loc {
-			out = append(out, loc)
-		}
-	}
-	locs = out
-
+	slices.SortFunc(locs, protocol.CompareLocation)
+	locs = slices.Compact(locs) // de-duplicate
 	return locs, nil
 }
 
@@ -97,12 +85,46 @@ func implementations(ctx context.Context, snapshot *cache.Snapshot, fh file.Hand
 	}
 
 	// Find implementations based on method sets.
+	var (
+		locsMu sync.Mutex
+		locs   []protocol.Location
+	)
+	// relation=0 here means infer direction of the relation
+	// (Supertypes/Subtypes) from concreteness of query type/method.
+	// (Ideally the implementations request would provide directionality
+	// so that one could ask for, say, the superinterfaces of io.ReadCloser;
+	// see https://github.com/golang/go/issues/68641#issuecomment-2269293762.)
+	const relation = methodsets.TypeRelation(0)
+	err = implementationsMsets(ctx, snapshot, pkg, pgf, pos, relation, func(_ metadata.PackagePath, _ string, _ bool, loc protocol.Location) {
+		locsMu.Lock()
+		locs = append(locs, loc)
+		locsMu.Unlock()
+	})
+	return locs, err
+}
 
+// An implYieldFunc is a callback called for each match produced by the implementation machinery.
+// - name describes the type or method.
+// - abstract indicates that the result is an interface type or interface method.
+//
+// implYieldFunc implementations must be concurrency-safe.
+type implYieldFunc func(pkgpath metadata.PackagePath, name string, abstract bool, loc protocol.Location)
+
+// implementationsMsets computes implementations of the type at the
+// specified position, by method sets.
+//
+// rel specifies the desired direction of the relation: Subtype,
+// Supertype, or both. As a special case, zero means infer the
+// direction from the concreteness of the query object: Supertype for
+// a concrete type, Subtype for an interface.
+//
+// It is shared by Implementations and TypeHierarchy.
+func implementationsMsets(ctx context.Context, snapshot *cache.Snapshot, pkg *cache.Package, pgf *parsego.File, pos token.Pos, rel methodsets.TypeRelation, yield implYieldFunc) error {
 	// First, find the object referenced at the cursor.
 	// The object may be declared in a different package.
-	obj, err := implementsObj(pkg, pgf, pos)
+	obj, err := implementsObj(pkg.TypesInfo(), pgf.File, pos)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	// If the resulting object has a position, we can expand the search to types
@@ -123,11 +145,11 @@ func implementations(ctx context.Context, snapshot *cache.Snapshot, fh file.Hand
 		declURI = protocol.URIFromPath(declPosn.Filename)
 		declMPs, err := snapshot.MetadataForFile(ctx, declURI)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		metadata.RemoveIntermediateTestVariants(&declMPs)
 		if len(declMPs) == 0 {
-			return nil, fmt.Errorf("no packages for file %s", declURI)
+			return fmt.Errorf("no packages for file %s", declURI)
 		}
 		ids := make([]PackageID, len(declMPs))
 		for i, mp := range declMPs {
@@ -135,7 +157,7 @@ func implementations(ctx context.Context, snapshot *cache.Snapshot, fh file.Hand
 		}
 		localPkgs, err = snapshot.TypeCheck(ctx, ids...)
 		if err != nil {
-			return nil, err
+			return err
 		}
 	}
 
@@ -143,23 +165,9 @@ func implementations(ctx context.Context, snapshot *cache.Snapshot, fh file.Hand
 
 	// Is the selected identifier a type name or method?
 	// (For methods, report the corresponding method names.)
-	//
-	// This logic is reused for local queries.
-	typeOrMethod := func(obj types.Object) (types.Type, *types.Func) {
-		switch obj := obj.(type) {
-		case *types.TypeName:
-			return obj.Type(), nil
-		case *types.Func:
-			// For methods, use the receiver type, which may be anonymous.
-			if recv := obj.Signature().Recv(); recv != nil {
-				return recv.Type(), obj
-			}
-		}
-		return nil, nil
-	}
 	queryType, queryMethod := typeOrMethod(obj)
 	if queryType == nil {
-		return nil, bug.Errorf("%s is not a type or method", obj.Name()) // should have been handled by implementsObj
+		return bug.Errorf("%s is not a type or method", obj.Name()) // should have been handled by implementsObj
 	}
 
 	// Compute the method-set fingerprint used as a key to the global search.
@@ -167,7 +175,15 @@ func implementations(ctx context.Context, snapshot *cache.Snapshot, fh file.Hand
 	if !hasMethods {
 		// A type with no methods yields an empty result.
 		// (No point reporting that every type satisfies 'any'.)
-		return nil, nil
+		return nil
+	}
+
+	// If the client specified no relation, infer it
+	// from the concreteness of the query type.
+	if rel == 0 {
+		rel = cond(types.IsInterface(queryType),
+			methodsets.Subtype,
+			methodsets.Supertype)
 	}
 
 	// The global search needs to look at every package in the
@@ -181,7 +197,7 @@ func implementations(ctx context.Context, snapshot *cache.Snapshot, fh file.Hand
 	// be optimized by being applied as soon as each package is available.
 	globalMetas, err := snapshot.AllMetadata(ctx)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	metadata.RemoveIntermediateTestVariants(&globalMetas)
 	globalIDs := make([]PackageID, 0, len(globalMetas))
@@ -198,36 +214,32 @@ func implementations(ctx context.Context, snapshot *cache.Snapshot, fh file.Hand
 	}
 	indexes, err := snapshot.MethodSets(ctx, globalIDs...)
 	if err != nil {
-		return nil, fmt.Errorf("querying method sets: %v", err)
+		return fmt.Errorf("querying method sets: %v", err)
 	}
 
 	// Search local and global packages in parallel.
-	var (
-		group  errgroup.Group
-		locsMu sync.Mutex
-		locs   []protocol.Location
-	)
+	var group errgroup.Group
+
 	// local search
-	for _, localPkg := range localPkgs {
+	for _, pkg := range localPkgs {
 		// The localImplementations algorithm assumes needle and haystack
 		// belong to a single package (="realm" of types symbol identities),
 		// so we need to recompute obj for each local package.
 		// (By contrast the global algorithm is name-based.)
-		declPkg := localPkg
 		group.Go(func() error {
-			pkgID := declPkg.Metadata().ID
-			declFile, err := declPkg.File(declURI)
+			pkgID := pkg.Metadata().ID
+
+			// Find declaring identifier based on (URI, offset)
+			// so that localImplementations can locate the
+			// corresponding obj/queryType/queryMethod in pkg.
+			declFile, err := pkg.File(declURI)
 			if err != nil {
 				return err // "can't happen"
 			}
-
-			// Find declaration of corresponding object
-			// in this package based on (URI, offset).
 			pos, err := safetoken.Pos(declFile.Tok, declOffset)
 			if err != nil {
 				return err // also "can't happen"
 			}
-			// TODO(adonovan): simplify: use objectsAt?
 			path := pathEnclosingObjNode(declFile.File, pos)
 			if path == nil {
 				return ErrNoIdentFound // checked earlier
@@ -236,27 +248,16 @@ func implementations(ctx context.Context, snapshot *cache.Snapshot, fh file.Hand
 			if !ok {
 				return ErrNoIdentFound // checked earlier
 			}
-			// Shadow obj, queryType, and queryMethod in this package.
-			obj := declPkg.TypesInfo().ObjectOf(id) // may be nil
-			queryType, queryMethod := typeOrMethod(obj)
-			if queryType == nil {
-				return fmt.Errorf("querying method sets in package %q: %v", pkgID, err)
-			}
-			localLocs, err := localImplementations(ctx, snapshot, declPkg, queryType, queryMethod)
-			if err != nil {
+			if err := localImplementations(ctx, snapshot, pkg, id, rel, yield); err != nil {
 				return fmt.Errorf("querying local implementations %q: %v", pkgID, err)
 			}
-			locsMu.Lock()
-			locs = append(locs, localLocs...)
-			locsMu.Unlock()
 			return nil
 		})
 	}
 	// global search
 	for _, index := range indexes {
-		index := index
 		group.Go(func() error {
-			for _, res := range index.Search(key, queryMethod) {
+			for _, res := range index.Search(key, rel, queryMethod) {
 				loc := res.Location
 				// Map offsets to protocol.Locations in parallel (may involve I/O).
 				group.Go(func() error {
@@ -264,20 +265,33 @@ func implementations(ctx context.Context, snapshot *cache.Snapshot, fh file.Hand
 					if err != nil {
 						return err
 					}
-					locsMu.Lock()
-					locs = append(locs, ploc)
-					locsMu.Unlock()
+					yield(index.PkgPath, res.TypeName, res.IsInterface, ploc)
 					return nil
 				})
 			}
 			return nil
 		})
 	}
-	if err := group.Wait(); err != nil {
-		return nil, err
-	}
+	return group.Wait()
+}
 
-	return locs, nil
+// typeOrMethod returns the type and optional method to use in an
+// Implementations operation on the specified symbol.
+// It returns a nil type to indicate that the query should not proceed.
+//
+// (It is factored out to allow it to be used both in the query package
+// then (in [localImplementations]) again in the declarating package.)
+func typeOrMethod(obj types.Object) (types.Type, *types.Func) {
+	switch obj := obj.(type) {
+	case *types.TypeName:
+		return obj.Type(), nil
+	case *types.Func:
+		// For methods, use the receiver type, which may be anonymous.
+		if recv := obj.Signature().Recv(); recv != nil {
+			return recv.Type(), obj
+		}
+	}
+	return nil, nil
 }
 
 // offsetToLocation converts an offset-based position to a protocol.Location,
@@ -298,7 +312,7 @@ func offsetToLocation(ctx context.Context, snapshot *cache.Snapshot, filename st
 
 // implementsObj returns the object to query for implementations,
 // which is a type name or method.
-func implementsObj(pkg *cache.Package, pgf *parsego.File, pos token.Pos) (types.Object, error) {
+func implementsObj(info *types.Info, file *ast.File, pos token.Pos) (types.Object, error) {
 	// This function inherits the limitation of its predecessor in
 	// requiring the selection to be an identifier (of a type or
 	// method). But there's no fundamental reason why one could
@@ -309,7 +323,7 @@ func implementsObj(pkg *cache.Package, pgf *parsego.File, pos token.Pos) (types.
 	// subexpression such as x.f().)
 
 	// TODO(adonovan): simplify: use objectsAt?
-	path := pathEnclosingObjNode(pgf.File, pos)
+	path := pathEnclosingObjNode(file, pos)
 	if path == nil {
 		return nil, ErrNoIdentFound
 	}
@@ -319,12 +333,12 @@ func implementsObj(pkg *cache.Package, pgf *parsego.File, pos token.Pos) (types.
 	}
 
 	// Is the object a type or method? Reject other kinds.
-	obj := pkg.TypesInfo().Uses[id]
+	obj := info.Uses[id]
 	if obj == nil {
 		// Check uses first (unlike ObjectOf) so that T in
 		// struct{T} is treated as a reference to a type,
 		// not a declaration of a field.
-		obj = pkg.TypesInfo().Defs[id]
+		obj = info.Defs[id]
 	}
 	switch obj := obj.(type) {
 	case *types.TypeName:
@@ -346,8 +360,9 @@ func implementsObj(pkg *cache.Package, pgf *parsego.File, pos token.Pos) (types.
 }
 
 // localImplementations searches within pkg for declarations of all
-// types that are assignable to/from the query type, and returns a new
-// unordered array of their locations.
+// supertypes (if rel contains Supertype) or subtypes (if rel contains
+// Subtype) of the type or method declared by id within the same
+// package, and returns a new unordered array of their locations.
 //
 // If method is non-nil, the function instead returns the location
 // of each type's method (if any) of that ID.
@@ -356,17 +371,41 @@ func implementsObj(pkg *cache.Package, pgf *parsego.File, pos token.Pos) (types.
 // function's results may include type declarations that are local to
 // a function body. The global search index excludes such types
 // because reliably naming such types is hard.)
-func localImplementations(ctx context.Context, snapshot *cache.Snapshot, pkg *cache.Package, queryType types.Type, method *types.Func) ([]protocol.Location, error) {
+//
+// Results are reported via the the yield function.
+func localImplementations(ctx context.Context, snapshot *cache.Snapshot, pkg *cache.Package, id *ast.Ident, rel methodsets.TypeRelation, yield implYieldFunc) error {
+	queryType, queryMethod := typeOrMethod(pkg.TypesInfo().Defs[id])
+	if queryType == nil {
+		return bug.Errorf("can't find corresponding symbol for %q in package %q", id.Name, pkg)
+	}
 	queryType = methodsets.EnsurePointer(queryType)
 
 	var msets typeutil.MethodSetCache
 
+	matches := func(candidateType types.Type) bool {
+		// Test the direction of the relation.
+		// The client may request either direction or both
+		// (e.g. when the client is References),
+		// and the Result reports each test independently;
+		// both tests succeed when comparing identical
+		// interface types.
+		var got methodsets.TypeRelation
+		if rel&methodsets.Supertype != 0 && implements(&msets, queryType, candidateType) {
+			got |= methodsets.Supertype
+		}
+		if rel&methodsets.Subtype != 0 && implements(&msets, candidateType, queryType) {
+			got |= methodsets.Subtype
+		}
+		return got != 0
+	}
+
 	// Scan through all type declarations in the syntax.
-	var locs []protocol.Location
-	var methodLocs []methodsets.Location
 	for _, pgf := range pkg.CompiledGoFiles() {
 		for cur := range pgf.Cursor.Preorder((*ast.TypeSpec)(nil)) {
 			spec := cur.Node().(*ast.TypeSpec)
+			if spec.Name == id {
+				continue // avoid self-comparison of query type
+			}
 			def := pkg.TypesInfo().Defs[spec.Name]
 			if def == nil {
 				continue // "can't happen" for types
@@ -375,15 +414,8 @@ func localImplementations(ctx context.Context, snapshot *cache.Snapshot, pkg *ca
 				continue // skip type aliases to avoid duplicate reporting
 			}
 			candidateType := methodsets.EnsurePointer(def.Type())
-
-			// The historical behavior enshrined by this
-			// function rejects cases where both are
-			// (nontrivial) interface types?
-			// That seems like useful information; see #68641.
-			// TODO(adonovan): UX: report I/I pairs too?
-			// The same question appears in the global algorithm (methodsets).
-			if !concreteImplementsIntf(&msets, candidateType, queryType) {
-				continue // not assignable
+			if !matches(candidateType) {
+				continue
 			}
 
 			// Ignore types with empty method sets.
@@ -393,9 +425,12 @@ func localImplementations(ctx context.Context, snapshot *cache.Snapshot, pkg *ca
 				continue
 			}
 
-			if method == nil {
+			isInterface := types.IsInterface(def.Type())
+
+			if queryMethod == nil {
 				// Found matching type.
-				locs = append(locs, mustLocation(pgf, spec.Name))
+				loc := mustLocation(pgf, spec.Name)
+				yield(pkg.Metadata().PkgPath, spec.Name.Name, isInterface, loc)
 				continue
 			}
 
@@ -407,41 +442,39 @@ func localImplementations(ctx context.Context, snapshot *cache.Snapshot, pkg *ca
 			// but it's easier to walk the method set.
 			for i := 0; i < mset.Len(); i++ {
 				m := mset.At(i).Obj()
-				if m.Id() == method.Id() {
+				if m.Pos() == id.Pos() {
+					continue // avoid self-comparison of query method
+				}
+				if m.Id() == queryMethod.Id() {
 					posn := safetoken.StartPosition(pkg.FileSet(), m.Pos())
-					methodLocs = append(methodLocs, methodsets.Location{
-						Filename: posn.Filename,
-						Start:    posn.Offset,
-						End:      posn.Offset + len(m.Name()),
-					})
+					loc, err := offsetToLocation(ctx, snapshot, posn.Filename, posn.Offset, posn.Offset+len(m.Name()))
+					if err != nil {
+						return err
+					}
+					yield(pkg.Metadata().PkgPath, m.Name(), isInterface, loc)
 					break
 				}
 			}
 		}
 	}
 
-	// Finally convert method positions to protocol form by reading the files.
-	for _, mloc := range methodLocs {
-		loc, err := offsetToLocation(ctx, snapshot, mloc.Filename, mloc.Start, mloc.End)
-		if err != nil {
-			return nil, err
-		}
-		locs = append(locs, loc)
-	}
-
-	// Special case: for types that satisfy error, report builtin.go (see #59527).
-	if types.Implements(queryType, errorInterfaceType) {
+	// Special case: for types that satisfy error,
+	// report error in builtin.go (see #59527).
+	//
+	// (An inconsistency: we always report the type error
+	// even when the query was for the method error.Error.)
+	if matches(errorType) {
 		loc, err := errorLocation(ctx, snapshot)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		locs = append(locs, loc)
+		yield("", "error", true, loc)
 	}
 
-	return locs, nil
+	return nil
 }
 
-var errorInterfaceType = types.Universe.Lookup("error").Type().Underlying().(*types.Interface)
+var errorType = types.Universe.Lookup("error").Type()
 
 // errorLocation returns the location of the 'error' type in builtin.go.
 func errorLocation(ctx context.Context, snapshot *cache.Snapshot) (protocol.Location, error) {
@@ -461,27 +494,13 @@ func errorLocation(ctx context.Context, snapshot *cache.Snapshot) (protocol.Loca
 	return protocol.Location{}, fmt.Errorf("built-in error type not found")
 }
 
-// concreteImplementsIntf reports whether x is an interface type
-// implemented by concrete type y, or vice versa.
-//
+// implements reports whether x implements y.
 // If one or both types are generic, the result indicates whether the
 // interface may be implemented under some instantiation.
-func concreteImplementsIntf(msets *typeutil.MethodSetCache, x, y types.Type) bool {
-	xiface := types.IsInterface(x)
-	yiface := types.IsInterface(y)
-
-	// Make sure exactly one is an interface type.
-	// TODO(adonovan): rescind this policy choice and report
-	// I/I relationships. See CL 619719 + issue #68641.
-	if xiface == yiface {
+func implements(msets *typeutil.MethodSetCache, x, y types.Type) bool {
+	if !types.IsInterface(y) {
 		return false
 	}
-
-	// Rearrange if needed so x is the concrete type.
-	if xiface {
-		x, y = y, x
-	}
-	// Inv: y is an interface type.
 
 	// For each interface method of y, check that x has it too.
 	// It is not necessary to compute x's complete method set.
