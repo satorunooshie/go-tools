@@ -94,11 +94,33 @@ Interfaces and concrete types are matched using method sets:
   location of the declaration of each type that implements
   the interface.
 - When invoked on a **concrete type**,
-  it returns the locations of the matching interface types. 
+  it returns the locations of the matching interface types.
 - When invoked on an **interface method**, it returns the corresponding
   methods of the types that satisfy the interface.
 - When invoked on a **concrete method**,
   it returns the locations of the matching interface methods.
+
+For example:
+- `implementation(io.Reader)` includes subinterfaces such as `io.ReadCloser`,
+  and concrete implementations such as `*os.File`. It also includes
+  other declarations equivalent to `io.Reader`.
+- `implementation(os.File)` includes only interfaces, such as
+  `io.Reader` and `io.ReadCloser`.
+
+The LSP's Implementation feature has a built-in bias towards subtypes,
+possibly because in languages such as Java and C++ the relationship
+between a type and its supertypes is explicit in the syntax, so the
+corresponding "Go to interfaces" operation can be achieved as sequence
+of two or more "Go to definition" steps: the first to visit the type
+declaration, and the rest to sequentially visit ancestors.
+(See https://github.com/microsoft/language-server-protocol/issues/2037.)
+
+In Go, where there is no syntactic relationship between two types, a
+search is required when navigating in either direction between
+subtypes and supertypes. The heuristic above works well in many cases,
+but it is not possible to ask for the superinterfaces of
+`io.ReadCloser`. For more explicit navigation between subtypes and
+supertypes, use the [Type Hierarchy](#Type Hierarchy) feature.
 
 Only non-trivial interfaces are considered; no implementations are
 reported for type `any`.
@@ -282,3 +304,36 @@ Client support:
 - **VS Code**: `Show Call Hierarchy` menu item (`⌥⇧H`) opens [Call hierarchy view](https://code.visualstudio.com/docs/cpp/cpp-ide#_call-hierarchy) (note: docs refer to C++ but the idea is the same for Go).
 - **Emacs + eglot**: Not standard; install with `(package-vc-install "https://github.com/dolmens/eglot-hierarchy")`. Use `M-x eglot-hierarchy-call-hierarchy` to show the direct incoming calls to the selected function; use a prefix argument (`C-u`) to show the direct outgoing calls. There is no way to expand the tree.
 - **CLI**: `gopls call_hierarchy file.go:#offset` shows outgoing and incoming calls.
+
+
+## Type Hierarchy
+
+The LSP TypeHierarchy mechanism consists of three queries that
+together enable clients to present a hierarchical view of a portion of
+the subtyping relation over named types.
+
+- [`textDocument/prepareTypeHierarchy`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification#textDocument_prepareTypeHierarchy) returns an [item](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification#typeHierarchyItem) describing the named type at the current position;
+- [`typeHierarchyItem/subtypes`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification#typeHierarchy_subtypes) returns the set of subtypes of the selected (interface) type; and
+- [`typeHierarchy/supertypes`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification#typeHierarchy_supertypes) returns the set of supertypes (interface types) of the selected type.
+
+Invoke the command while selecting the name of a type.
+
+As with an Implementation query, a type hierarchy query reports
+function-local types only within the same package as the query type.
+Also the result does not include alias types, only defined types.
+
+<img title="Type Hierarchy: supertypes of net.Conn" src="../assets/supertypes.png" width="400">
+
+<img title="Type Hierarchy: subtypes of io.Writer" src="../assets/subtypes.png" width="400">
+
+Caveats:
+
+- The type hierarchy supports only named types and their assignability
+  relation. By contrast, the Implementations request also reports the
+  relation between unnamed `func` types and function declarations,
+  function literals, and dynamic calls of values of those types.
+
+Client support:
+- **VS Code**: `Show Type Hierarchy` menu item opens [Type hierarchy view](https://code.visualstudio.com/docs/java/java-editing#_type-hierarchy) (note: docs refer to Java but the idea is the same for Go).
+- **Emacs + eglot**: Support added in March 2025. Use `M-x eglot-show-call-hierarchy`.
+- **CLI**: not yet supported.
