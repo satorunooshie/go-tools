@@ -34,13 +34,8 @@ func (c *Canceler) Preempt(ctx context.Context, req *jsonrpc2_v2.Request) (any, 
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		return nil, fmt.Errorf("%w: %v", jsonrpc2_v2.ErrParse, err)
 	}
-	var id jsonrpc2_v2.ID
-	switch raw := params.ID.(type) {
-	case float64:
-		id = jsonrpc2_v2.Int64ID(int64(raw))
-	case string:
-		id = jsonrpc2_v2.StringID(raw)
-	default:
+	id, err := jsonrpc2_v2.MakeID(params.ID)
+	if err != nil {
 		return nil, fmt.Errorf("%w: invalid ID type %T", jsonrpc2_v2.ErrParse, params.ID)
 	}
 	c.Conn.Cancel(id)
@@ -62,7 +57,7 @@ func (b *ForwardBinder) Bind(ctx context.Context, conn *jsonrpc2_v2.Connection) 
 	client := protocol.ClientDispatcherV2(conn)
 	clientBinder := NewClientBinder(func(context.Context, protocol.Server) protocol.Client { return client })
 
-	serverConn, err := jsonrpc2_v2.Dial(context.Background(), b.dialer, clientBinder)
+	serverConn, err := jsonrpc2_v2.Dial(context.Background(), b.dialer, clientBinder, nil)
 	if err != nil {
 		return jsonrpc2_v2.ConnectionOptions{
 			Handler: jsonrpc2_v2.HandlerFunc(func(context.Context, *jsonrpc2_v2.Request) (any, error) {

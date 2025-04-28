@@ -18,7 +18,6 @@ import (
 	"go/token"
 	"go/types"
 	"log"
-	"maps"
 	urlpkg "net/url"
 	"path/filepath"
 	"reflect"
@@ -45,6 +44,7 @@ import (
 	"golang.org/x/tools/gopls/internal/util/frob"
 	"golang.org/x/tools/gopls/internal/util/moremaps"
 	"golang.org/x/tools/gopls/internal/util/persistent"
+	"golang.org/x/tools/gopls/internal/util/safetoken"
 	"golang.org/x/tools/internal/analysisinternal"
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/facts"
@@ -127,11 +127,12 @@ func (s *Snapshot) Analyze(ctx context.Context, pkgs map[PackageID]*metadata.Pac
 
 	// Filter and sort enabled root analyzers.
 	// A disabled analyzer may still be run if required by another.
-	analyzers := analyzers(s.Options().Staticcheck)
-	toSrc := make(map[*analysis.Analyzer]*settings.Analyzer)
-	var enabledAnalyzers []*analysis.Analyzer // enabled subset + transitive requirements
-	for _, a := range analyzers {
-		if enabled, ok := s.Options().Analyses[a.Analyzer().Name]; enabled || !ok && a.EnabledByDefault() {
+	var (
+		toSrc            = make(map[*analysis.Analyzer]*settings.Analyzer)
+		enabledAnalyzers []*analysis.Analyzer // enabled subset + transitive requirements
+	)
+	for _, a := range settings.AllAnalyzers {
+		if a.Enabled(s.Options()) {
 			toSrc[a.Analyzer()] = a
 			enabledAnalyzers = append(enabledAnalyzers, a.Analyzer())
 		}
@@ -139,7 +140,6 @@ func (s *Snapshot) Analyze(ctx context.Context, pkgs map[PackageID]*metadata.Pac
 	sort.Slice(enabledAnalyzers, func(i, j int) bool {
 		return enabledAnalyzers[i].Name < enabledAnalyzers[j].Name
 	})
-	analyzers = nil // prevent accidental use
 
 	enabledAnalyzers = requiredAnalyzers(enabledAnalyzers)
 
@@ -429,14 +429,6 @@ func (s *Snapshot) Analyze(ctx context.Context, pkgs map[PackageID]*metadata.Pac
 		}
 	}
 	return results, nil
-}
-
-func analyzers(staticcheck bool) []*settings.Analyzer {
-	analyzers := slices.Collect(maps.Values(settings.DefaultAnalyzers))
-	if staticcheck {
-		analyzers = slices.AppendSeq(analyzers, maps.Values(settings.StaticcheckAnalyzers))
-	}
-	return analyzers
 }
 
 func (an *analysisNode) decrefPreds() {
@@ -899,7 +891,6 @@ func (act *action) String() string {
 func execActions(ctx context.Context, actions []*action) {
 	var wg sync.WaitGroup
 	for _, act := range actions {
-		act := act
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -1028,93 +1019,6 @@ func (act *action) exec(ctx context.Context) (any, *actionSummary, error) {
 		factFilter[reflect.TypeOf(f)] = true
 	}
 
-	// posToLocation converts from token.Pos to protocol form.
-	posToLocation := func(start, end token.Pos) (protocol.Location, error) {
-		tokFile := apkg.pkg.FileSet().File(start)
-
-		// Find existing mapper by file name.
-		// (Don't require an exact token.File match
-		// as the analyzer may have re-parsed the file.)
-		var (
-			mapper *protocol.Mapper
-			fixed  bool
-		)
-		for _, p := range apkg.pkg.CompiledGoFiles() {
-			if p.Tok.Name() == tokFile.Name() {
-				mapper = p.Mapper
-				fixed = p.Fixed() // suppress some assertions after parser recovery
-				break
-			}
-		}
-		if mapper == nil {
-			// The start position was not among the package's parsed
-			// Go files, indicating that the analyzer added new files
-			// to the FileSet.
-			//
-			// For example, the cgocall analyzer re-parses and
-			// type-checks some of the files in a special environment;
-			// and asmdecl and other low-level runtime analyzers call
-			// ReadFile to parse non-Go files.
-			// (This is a supported feature, documented at go/analysis.)
-			//
-			// In principle these files could be:
-			//
-			// - OtherFiles (non-Go files such as asm).
-			//   However, we set Pass.OtherFiles=[] because
-			//   gopls won't service "diagnose" requests
-			//   for non-Go files, so there's no point
-			//   reporting diagnostics in them.
-			//
-			// - IgnoredFiles (files tagged for other configs).
-			//   However, we set Pass.IgnoredFiles=[] because,
-			//   in most cases, zero-config gopls should create
-			//   another view that covers these files.
-			//
-			// - Referents of //line directives, as in cgo packages.
-			//   The file names in this case are not known a priori.
-			//   gopls generally tries to avoid honoring line directives,
-			//   but analyzers such as cgocall may honor them.
-			//
-			// In short, it's unclear how this can be reached
-			// other than due to an analyzer bug.
-			return protocol.Location{}, bug.Errorf("diagnostic location is not among files of package: %s", tokFile.Name())
-		}
-		// Inv: mapper != nil
-
-		if end == token.NoPos {
-			end = start
-		}
-
-		// debugging #64547
-		fileStart := token.Pos(tokFile.Base())
-		fileEnd := fileStart + token.Pos(tokFile.Size())
-		if start < fileStart {
-			if !fixed {
-				bug.Reportf("start < start of file")
-			}
-			start = fileStart
-		}
-		if end < start {
-			// This can happen if End is zero (#66683)
-			// or a small positive displacement from zero
-			// due to recursive Node.End() computation.
-			// This usually arises from poor parser recovery
-			// of an incomplete term at EOF.
-			if !fixed {
-				bug.Reportf("end < start of file")
-			}
-			end = fileEnd
-		}
-		if end > fileEnd+1 {
-			if !fixed {
-				bug.Reportf("end > end of file + 1")
-			}
-			end = fileEnd
-		}
-
-		return mapper.PosLocation(tokFile, start, end)
-	}
-
 	// Now run the (pkg, analyzer) action.
 	var diagnostics []gobDiagnostic
 
@@ -1131,11 +1035,15 @@ func (act *action) exec(ctx context.Context) (any, *actionSummary, error) {
 		ResultOf:     inputs,
 		Report: func(d analysis.Diagnostic) {
 			// Assert that SuggestedFixes are well formed.
+			//
+			// ValidateFixes allows a fix.End to be slightly beyond
+			// EOF to avoid spurious assertions when reporting
+			// fixes as the end of truncated files; see #71659.
 			if err := analysisinternal.ValidateFixes(apkg.pkg.FileSet(), analyzer, d.SuggestedFixes); err != nil {
 				bug.Reportf("invalid SuggestedFixes: %v", err)
 				d.SuggestedFixes = nil
 			}
-			diagnostic, err := toGobDiagnostic(posToLocation, analyzer, d)
+			diagnostic, err := toGobDiagnostic(apkg.pkg, analyzer, d)
 			if err != nil {
 				// Don't bug.Report here: these errors all originate in
 				// posToLocation, and we can more accurately discriminate
@@ -1327,12 +1235,12 @@ type gobTextEdit struct {
 
 // toGobDiagnostic converts an analysis.Diagnosic to a serializable gobDiagnostic,
 // which requires expanding token.Pos positions into protocol.Location form.
-func toGobDiagnostic(posToLocation func(start, end token.Pos) (protocol.Location, error), a *analysis.Analyzer, diag analysis.Diagnostic) (gobDiagnostic, error) {
+func toGobDiagnostic(pkg *Package, a *analysis.Analyzer, diag analysis.Diagnostic) (gobDiagnostic, error) {
 	var fixes []gobSuggestedFix
 	for _, fix := range diag.SuggestedFixes {
 		var gobEdits []gobTextEdit
 		for _, textEdit := range fix.TextEdits {
-			loc, err := posToLocation(textEdit.Pos, textEdit.End)
+			loc, err := diagnosticPosToLocation(pkg, false, textEdit.Pos, textEdit.End)
 			if err != nil {
 				return gobDiagnostic{}, fmt.Errorf("in SuggestedFixes: %w", err)
 			}
@@ -1349,7 +1257,10 @@ func toGobDiagnostic(posToLocation func(start, end token.Pos) (protocol.Location
 
 	var related []gobRelatedInformation
 	for _, r := range diag.Related {
-		loc, err := posToLocation(r.Pos, r.End)
+		// The position of RelatedInformation may be
+		// within another (dependency) package.
+		const allowDeps = true
+		loc, err := diagnosticPosToLocation(pkg, allowDeps, r.Pos, r.End)
 		if err != nil {
 			return gobDiagnostic{}, fmt.Errorf("in Related: %w", err)
 		}
@@ -1359,7 +1270,7 @@ func toGobDiagnostic(posToLocation func(start, end token.Pos) (protocol.Location
 		})
 	}
 
-	loc, err := posToLocation(diag.Pos, diag.End)
+	loc, err := diagnosticPosToLocation(pkg, false, diag.Pos, diag.End)
 	if err != nil {
 		return gobDiagnostic{}, err
 	}
@@ -1385,6 +1296,126 @@ func toGobDiagnostic(posToLocation func(start, end token.Pos) (protocol.Location
 		Related:        related,
 		// Analysis diagnostics do not contain tags.
 	}, nil
+}
+
+// diagnosticPosToLocation converts from token.Pos to protocol form, in the
+// context of the specified package and, optionally, its dependencies.
+func diagnosticPosToLocation(pkg *Package, allowDeps bool, start, end token.Pos) (protocol.Location, error) {
+	if end == token.NoPos {
+		end = start
+	}
+
+	fset := pkg.FileSet()
+	tokFile := fset.File(start)
+
+	// Find existing mapper by file name.
+	// (Don't require an exact token.File match
+	// as the analyzer may have re-parsed the file.)
+	var (
+		mapper *protocol.Mapper
+		fixed  bool
+	)
+	for _, p := range pkg.CompiledGoFiles() {
+		if p.Tok.Name() == tokFile.Name() {
+			mapper = p.Mapper
+			fixed = p.Fixed() // suppress some assertions after parser recovery
+			break
+		}
+	}
+	// TODO(adonovan): search pkg.AsmFiles too; see #71754.
+	if mapper != nil {
+		// debugging #64547
+		fileStart := token.Pos(tokFile.Base())
+		fileEnd := fileStart + token.Pos(tokFile.Size())
+		if start < fileStart {
+			if !fixed {
+				bug.Reportf("start < start of file")
+			}
+			start = fileStart
+		}
+		if end < start {
+			// This can happen if End is zero (#66683)
+			// or a small positive displacement from zero
+			// due to recursive Node.End() computation.
+			// This usually arises from poor parser recovery
+			// of an incomplete term at EOF.
+			if !fixed {
+				bug.Reportf("end < start of file")
+			}
+			end = fileEnd
+		}
+		if end > fileEnd+1 {
+			if !fixed {
+				bug.Reportf("end > end of file + 1")
+			}
+			end = fileEnd
+		}
+
+		return mapper.PosLocation(tokFile, start, end)
+	}
+
+	// Inv: the positions are not within this package.
+
+	if allowDeps {
+		// Positions in Diagnostic.RelatedInformation may belong to a
+		// dependency package. We cannot accurately map them to
+		// protocol.Location coordinates without a Mapper for the
+		// relevant file, but none exists if the file was loaded from
+		// export data, and we have no means (Snapshot) of loading it.
+		//
+		// So, fall back to approximate conversion to UTF-16:
+		// for non-ASCII text, the column numbers may be wrong.
+		var (
+			startPosn = safetoken.StartPosition(fset, start)
+			endPosn   = safetoken.EndPosition(fset, end)
+		)
+		return protocol.Location{
+			URI: protocol.URIFromPath(startPosn.Filename),
+			Range: protocol.Range{
+				Start: protocol.Position{
+					Line:      uint32(startPosn.Line - 1),
+					Character: uint32(startPosn.Column - 1),
+				},
+				End: protocol.Position{
+					Line:      uint32(endPosn.Line - 1),
+					Character: uint32(endPosn.Column - 1),
+				},
+			},
+		}, nil
+	}
+
+	// The start position was not among the package's parsed
+	// Go files, indicating that the analyzer added new files
+	// to the FileSet.
+	//
+	// For example, the cgocall analyzer re-parses and
+	// type-checks some of the files in a special environment;
+	// and asmdecl and other low-level runtime analyzers call
+	// ReadFile to parse non-Go files.
+	// (This is a supported feature, documented at go/analysis.)
+	//
+	// In principle these files could be:
+	//
+	// - OtherFiles (non-Go files such as asm).
+	//   However, we set Pass.OtherFiles=[] because
+	//   gopls won't service "diagnose" requests
+	//   for non-Go files, so there's no point
+	//   reporting diagnostics in them.
+	//
+	// - IgnoredFiles (files tagged for other configs).
+	//   However, we set Pass.IgnoredFiles=[] because,
+	//   in most cases, zero-config gopls should create
+	//   another view that covers these files.
+	//
+	// - Referents of //line directives, as in cgo packages.
+	//   The file names in this case are not known a priori.
+	//   gopls generally tries to avoid honoring line directives,
+	//   but analyzers such as cgocall may honor them.
+	//
+	// In short, it's unclear how this can be reached
+	// other than due to an analyzer bug.
+
+	return protocol.Location{}, bug.Errorf("diagnostic location is not among files of package: %s", tokFile.Name())
 }
 
 // effectiveURL computes the effective URL of diag,

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -22,6 +23,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/fatih/gomodifytags/modifytags"
 	"golang.org/x/mod/modfile"
 	"golang.org/x/telemetry/counter"
 	"golang.org/x/tools/go/ast/astutil"
@@ -59,14 +61,7 @@ func (s *server) ExecuteCommand(ctx context.Context, params *protocol.ExecuteCom
 		defer work.End(ctx, "Done.")
 	}
 
-	var found bool
-	for _, name := range s.Options().SupportedCommands {
-		if name == params.Command {
-			found = true
-			break
-		}
-	}
-	if !found {
+	if !slices.Contains(s.Options().SupportedCommands, params.Command) {
 		return nil, fmt.Errorf("%s is not a supported command", params.Command)
 	}
 
@@ -1202,9 +1197,7 @@ func (c *commandHandler) FetchVulncheckResult(ctx context.Context, arg command.U
 			}
 		}
 		// Overwrite if there is any govulncheck-based result.
-		for modfile, result := range deps.snapshot.Vulnerabilities() {
-			ret[modfile] = result
-		}
+		maps.Copy(ret, deps.snapshot.Vulnerabilities())
 		return nil
 	})
 	return ret, err
@@ -1671,7 +1664,6 @@ func (c *commandHandler) DiagnoseFiles(ctx context.Context, args command.Diagnos
 
 		var wg sync.WaitGroup
 		for snapshot := range snapshots {
-			snapshot := snapshot
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
@@ -1763,4 +1755,89 @@ func (c *commandHandler) PackageSymbols(ctx context.Context, args command.Packag
 	})
 
 	return result, err
+}
+
+// optionsStringToMap transforms comma-separated options of the form
+// "foo=bar,baz=quux" to a go map. Returns nil if any options are malformed.
+func optionsStringToMap(options string) (map[string][]string, error) {
+	optionsMap := make(map[string][]string)
+	for item := range strings.SplitSeq(options, ",") {
+		key, option, found := strings.Cut(item, "=")
+		if !found {
+			return nil, fmt.Errorf("invalid option %q", item)
+		}
+		optionsMap[key] = append(optionsMap[key], option)
+	}
+	return optionsMap, nil
+}
+
+func (c *commandHandler) ModifyTags(ctx context.Context, args command.ModifyTagsArgs) error {
+	return c.run(ctx, commandConfig{
+		progress: "Modifying tags",
+		forURI:   args.URI,
+	}, func(ctx context.Context, deps commandDeps) error {
+		m := &modifytags.Modification{
+			Clear:        args.Clear,
+			ClearOptions: args.ClearOptions,
+			ValueFormat:  args.ValueFormat,
+			Overwrite:    args.Overwrite,
+		}
+
+		transform, err := parseTransform(args.Transform)
+		if err != nil {
+			return err
+		}
+		m.Transform = transform
+
+		if args.Add != "" {
+			m.Add = strings.Split(args.Add, ",")
+		}
+		if args.AddOptions != "" {
+			if options, err := optionsStringToMap(args.AddOptions); err != nil {
+				return err
+			} else {
+				m.AddOptions = options
+			}
+		}
+		if args.Remove != "" {
+			m.Remove = strings.Split(args.Remove, ",")
+		}
+		if args.RemoveOptions != "" {
+			if options, err := optionsStringToMap(args.RemoveOptions); err != nil {
+				return err
+			} else {
+				m.RemoveOptions = options
+			}
+		}
+		fh, err := deps.snapshot.ReadFile(ctx, args.URI)
+		if err != nil {
+			return err
+		}
+		changes, err := golang.ModifyTags(ctx, deps.snapshot, fh, args, m)
+		if err != nil {
+			return err
+		}
+		return applyChanges(ctx, c.s.client, changes)
+	})
+}
+
+func parseTransform(input string) (modifytags.Transform, error) {
+	switch input {
+	case "camelcase":
+		return modifytags.CamelCase, nil
+	case "lispcase":
+		return modifytags.LispCase, nil
+	case "pascalcase":
+		return modifytags.PascalCase, nil
+	case "titlecase":
+		return modifytags.TitleCase, nil
+	case "keep":
+		return modifytags.Keep, nil
+	case "":
+		fallthrough
+	case "snakecase":
+		return modifytags.SnakeCase, nil
+	default:
+		return modifytags.SnakeCase, fmt.Errorf("invalid Transform value")
+	}
 }
