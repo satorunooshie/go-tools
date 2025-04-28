@@ -51,9 +51,11 @@ import (
 	"go/printer"
 	"go/token"
 	"go/types"
+	"maps"
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -169,14 +171,7 @@ func PrepareRename(ctx context.Context, snapshot *cache.Snapshot, f file.Handle,
 
 func prepareRenamePackageName(ctx context.Context, snapshot *cache.Snapshot, pgf *parsego.File) (*PrepareItem, error) {
 	// Does the client support file renaming?
-	fileRenameSupported := false
-	for _, op := range snapshot.Options().SupportedResourceOperations {
-		if op == protocol.Rename {
-			fileRenameSupported = true
-			break
-		}
-	}
-	if !fileRenameSupported {
+	if !slices.Contains(snapshot.Options().SupportedResourceOperations, protocol.Rename) {
 		return nil, errors.New("can't rename package: LSP client does not support file renaming")
 	}
 
@@ -438,13 +433,7 @@ func Rename(ctx context.Context, snapshot *cache.Snapshot, f file.Handle, pp pro
 		// become reordered) and that are either identical or
 		// non-overlapping.
 		diff.SortEdits(edits)
-		filtered := edits[:0]
-		for i, edit := range edits {
-			if i == 0 || edit != filtered[len(filtered)-1] {
-				filtered = append(filtered, edit)
-			}
-		}
-		edits = filtered
+		edits = slices.Compact(edits)
 
 		// TODO(adonovan): the logic above handles repeat edits to the
 		// same file URI (e.g. as a member of package p and p_test) but
@@ -541,7 +530,7 @@ func renameOrdinary(ctx context.Context, snapshot *cache.Snapshot, f file.Handle
 		//
 		// Note that unlike Funcs, TypeNames are always canonical (they are "left"
 		// of the type parameters, unlike methods).
-		switch obj.(type) { // avoid "obj :=" since cases reassign the var
+		switch obj0 := obj.(type) { // avoid "obj :=" since cases reassign the var
 		case *types.TypeName:
 			if _, ok := types.Unalias(obj.Type()).(*types.TypeParam); ok {
 				// As with capitalized function parameters below, type parameters are
@@ -549,7 +538,7 @@ func renameOrdinary(ctx context.Context, snapshot *cache.Snapshot, f file.Handle
 				goto skipObjectPath
 			}
 		case *types.Func:
-			obj = obj.(*types.Func).Origin()
+			obj = obj0.Origin()
 		case *types.Var:
 			// TODO(adonovan): do vars need the origin treatment too? (issue #58462)
 
@@ -563,7 +552,7 @@ func renameOrdinary(ctx context.Context, snapshot *cache.Snapshot, f file.Handle
 			// objectpath, the classifies them as local vars, but as
 			// they came from export data they lack syntax and the
 			// correct scope tree (issue #61294).
-			if !obj.(*types.Var).IsField() && !typesinternal.IsPackageLevel(obj) {
+			if !obj0.IsField() && !typesinternal.IsPackageLevel(obj) {
 				goto skipObjectPath
 			}
 		}
@@ -726,9 +715,7 @@ func typeCheckReverseDependencies(ctx context.Context, snapshot *cache.Snapshot,
 			return nil, err
 		}
 		allRdeps[variant.ID] = variant // include self
-		for id, meta := range rdeps {
-			allRdeps[id] = meta
-		}
+		maps.Copy(allRdeps, rdeps)
 	}
 	var ids []PackageID
 	for id, meta := range allRdeps {
@@ -1152,7 +1139,12 @@ func renameImports(ctx context.Context, snapshot *cache.Snapshot, mp *metadata.P
 					continue // not the import we're looking for
 				}
 
-				pkgname := pkg.TypesInfo().Implicits[imp].(*types.PkgName)
+				pkgname, ok := pkg.TypesInfo().Implicits[imp].(*types.PkgName)
+				if !ok {
+					// "can't happen", but be defensive (#71656)
+					return fmt.Errorf("internal error: missing type information for %s import at %s",
+						imp.Path.Value, safetoken.StartPosition(pkg.FileSet(), imp.Pos()))
+				}
 
 				pkgScope := pkg.Types().Scope()
 				fileScope := pkg.TypesInfo().Scopes[f.File]
