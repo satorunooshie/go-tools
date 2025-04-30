@@ -50,11 +50,13 @@ func TestValidate(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, g := range groups {
-				if g.Schema.Properties != nil {
-					t.Skip("schema has properties")
-				}
-				rs := &ResolvedSchema{root: g.Schema}
 				t.Run(g.Description, func(t *testing.T) {
+					rs := &ResolvedSchema{root: g.Schema}
+					for s := range g.Schema.all() {
+						if s.Properties != nil || s.Required != nil || s.Defs != nil || s.UnevaluatedProperties != nil {
+							t.Skip("schema or subschema has unimplemented keywords")
+						}
+					}
 					for _, test := range g.Tests {
 						t.Run(test.Description, func(t *testing.T) {
 							err = rs.Validate(test.Data)
