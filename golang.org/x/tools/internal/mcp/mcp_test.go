@@ -41,9 +41,25 @@ func TestEndToEnd(t *testing.T) {
 
 	// The 'fail' tool returns this error.
 	failure := errors.New("mcp failure")
-	s.AddTools(MakeTool("fail", "just fail", func(context.Context, *ClientConnection, struct{}) ([]Content, error) {
-		return nil, failure
-	}))
+	s.AddTools(
+		MakeTool("fail", "just fail", func(context.Context, *ClientConnection, struct{}) ([]Content, error) {
+			return nil, failure
+		}),
+	)
+
+	s.AddPrompts(
+		MakePrompt("code_review", "do a code review", func(_ context.Context, _ *ClientConnection, params struct{ Code string }) (*protocol.GetPromptResult, error) {
+			return &protocol.GetPromptResult{
+				Description: "Code review prompt",
+				Messages: []protocol.PromptMessage{
+					{Role: "user", Content: TextContent{Text: "Please review the following code: " + params.Code}.ToWire()},
+				},
+			}, nil
+		}),
+		MakePrompt("fail", "", func(_ context.Context, _ *ClientConnection, params struct{}) (*protocol.GetPromptResult, error) {
+			return nil, failure
+		}),
+	)
 
 	// Connect the server.
 	cc, err := s.Connect(ctx, st, nil)
@@ -67,20 +83,50 @@ func TestEndToEnd(t *testing.T) {
 	c := NewClient("testClient", "v1.0.0", nil)
 
 	// Connect the client.
-	sc, err := c.Connect(ctx, ct, nil)
-	if err != nil {
+	if err := c.Connect(ctx, ct, nil); err != nil {
 		t.Fatal(err)
 	}
 
-	if got := slices.Collect(c.Servers()); len(got) != 1 {
-		t.Errorf("after connection, Servers() has length %d, want 1", len(got))
-	}
-
-	if err := sc.Ping(ctx); err != nil {
+	if err := c.Ping(ctx); err != nil {
 		t.Fatalf("ping failed: %v", err)
 	}
 
-	gotTools, err := sc.ListTools(ctx)
+	gotPrompts, err := c.ListPrompts(ctx)
+	if err != nil {
+		t.Errorf("prompts/list failed: %v", err)
+	}
+	wantPrompts := []protocol.Prompt{
+		{
+			Name:        "code_review",
+			Description: "do a code review",
+			Arguments:   []protocol.PromptArgument{{Name: "Code", Required: true}},
+		},
+		{Name: "fail"},
+	}
+	if diff := cmp.Diff(wantPrompts, gotPrompts); diff != "" {
+		t.Fatalf("prompts/list mismatch (-want +got):\n%s", diff)
+	}
+
+	gotReview, err := c.GetPrompt(ctx, "code_review", map[string]string{"Code": "1+1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantReview := &protocol.GetPromptResult{
+		Description: "Code review prompt",
+		Messages: []protocol.PromptMessage{{
+			Content: TextContent{Text: "Please review the following code: 1+1"}.ToWire(),
+			Role:    "user",
+		}},
+	}
+	if diff := cmp.Diff(wantReview, gotReview); diff != "" {
+		t.Errorf("prompts/get 'code_review' mismatch (-want +got):\n%s", diff)
+	}
+
+	if _, err := c.GetPrompt(ctx, "fail", map[string]string{}); err == nil || !strings.Contains(err.Error(), failure.Error()) {
+		t.Errorf("fail returned unexpected error: got %v, want containing %v", err, failure)
+	}
+
+	gotTools, err := c.ListTools(ctx)
 	if err != nil {
 		t.Errorf("tools/list failed: %v", err)
 	}
@@ -88,7 +134,8 @@ func TestEndToEnd(t *testing.T) {
 		Name:        "greet",
 		Description: "say hi",
 		InputSchema: &jsonschema.Schema{
-			Type: "object",
+			Type:     "object",
+			Required: []string{"Name"},
 			Properties: map[string]*jsonschema.Schema{
 				"Name": {Type: "string"},
 			},
@@ -106,30 +153,39 @@ func TestEndToEnd(t *testing.T) {
 		t.Fatalf("tools/list mismatch (-want +got):\n%s", diff)
 	}
 
-	gotHi, err := sc.CallTool(ctx, "greet", hiParams{"user"})
+	gotHi, err := c.CallTool(ctx, "greet", map[string]any{"name": "user"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantHi := []Content{TextContent{Text: "hi user"}}
+	wantHi := &protocol.CallToolResult{
+		Content: []protocol.Content{{Type: "text", Text: "hi user"}},
+	}
 	if diff := cmp.Diff(wantHi, gotHi); diff != "" {
 		t.Errorf("tools/call 'greet' mismatch (-want +got):\n%s", diff)
 	}
 
-	if _, err := sc.CallTool(ctx, "fail", struct{}{}); err == nil || !strings.Contains(err.Error(), failure.Error()) {
-		t.Errorf("fail returned unexpected error: got %v, want containing %v", err, failure)
+	gotFail, err := c.CallTool(ctx, "fail", map[string]any{})
+	// Counter-intuitively, when a tool fails, we don't expect an RPC error for
+	// call tool: instead, the failure is embedded in the result.
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantFail := &protocol.CallToolResult{
+		IsError: true,
+		Content: []protocol.Content{{Type: "text", Text: failure.Error()}},
+	}
+	if diff := cmp.Diff(wantFail, gotFail); diff != "" {
+		t.Errorf("tools/call 'fail' mismatch (-want +got):\n%s", diff)
 	}
 
 	// Disconnect.
-	sc.Close()
+	c.Close()
 	clientWG.Wait()
 
 	// After disconnecting, neither client nor server should have any
 	// connections.
 	for range s.Clients() {
 		t.Errorf("unexpected client after disconnection")
-	}
-	for range c.Servers() {
-		t.Errorf("unexpected server after disconnection")
 	}
 }
 
@@ -138,7 +194,7 @@ func TestEndToEnd(t *testing.T) {
 //
 // The caller should cancel either the client connection or server connection
 // when the connections are no longer needed.
-func basicConnection(t *testing.T, tools ...*Tool) (*ClientConnection, *ServerConnection) {
+func basicConnection(t *testing.T, tools ...*Tool) (*ClientConnection, *Client) {
 	t.Helper()
 
 	ctx := context.Background()
@@ -154,32 +210,31 @@ func basicConnection(t *testing.T, tools ...*Tool) (*ClientConnection, *ServerCo
 	}
 
 	c := NewClient("testClient", "v1.0.0", nil)
-	sc, err := c.Connect(ctx, ct, nil)
-	if err != nil {
+	if err := c.Connect(ctx, ct, nil); err != nil {
 		t.Fatal(err)
 	}
-	return cc, sc
+	return cc, c
 }
 
 func TestServerClosing(t *testing.T) {
-	cc, sc := basicConnection(t, MakeTool("greet", "say hi", sayHi))
-	defer sc.Close()
+	cc, c := basicConnection(t, MakeTool("greet", "say hi", sayHi))
+	defer c.Close()
 
 	ctx := context.Background()
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
-		if err := sc.Wait(); err != nil {
+		if err := c.Wait(); err != nil {
 			t.Errorf("server connection failed: %v", err)
 		}
 		wg.Done()
 	}()
-	if _, err := sc.CallTool(ctx, "greet", hiParams{"user"}); err != nil {
+	if _, err := c.CallTool(ctx, "greet", map[string]any{"name": "user"}); err != nil {
 		t.Fatalf("after connecting: %v", err)
 	}
 	cc.Close()
 	wg.Wait()
-	if _, err := sc.CallTool(ctx, "greet", hiParams{"user"}); !errors.Is(err, ErrConnectionClosed) {
+	if _, err := c.CallTool(ctx, "greet", map[string]any{"name": "user"}); !errors.Is(err, ErrConnectionClosed) {
 		t.Errorf("after disconnection, got error %v, want EOF", err)
 	}
 }
@@ -200,16 +255,15 @@ func TestBatching(t *testing.T) {
 	// 'initialize' to block. Therefore, we can only test with a size of 1.
 	const batchSize = 1
 	BatchSize(ct, batchSize)
-	sc, err := c.Connect(ctx, ct, opts)
-	if err != nil {
+	if err := c.Connect(ctx, ct, opts); err != nil {
 		t.Fatal(err)
 	}
-	defer sc.Close()
+	defer c.Close()
 
 	errs := make(chan error, batchSize)
 	for i := range batchSize {
 		go func() {
-			_, err := sc.ListTools(ctx)
+			_, err := c.ListTools(ctx)
 			errs <- err
 		}()
 		time.Sleep(2 * time.Millisecond)
@@ -243,7 +297,7 @@ func TestCancellation(t *testing.T) {
 	defer sc.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	go sc.CallTool(ctx, "slow", struct{}{})
+	go sc.CallTool(ctx, "slow", map[string]any{})
 	<-start
 	cancel()
 	select {

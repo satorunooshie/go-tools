@@ -79,11 +79,11 @@ func (st *state) validate(instance reflect.Value, schema *Schema, callerAnns *an
 			// "number" subsumes integers
 			if !(gotType == schema.Type ||
 				gotType == "integer" && schema.Type == "number") {
-				return fmt.Errorf("type: %s has type %q, want %q", instance, gotType, schema.Type)
+				return fmt.Errorf("type: %v has type %q, want %q", instance, gotType, schema.Type)
 			}
 		} else {
 			if !(slices.Contains(schema.Types, gotType) || (gotType == "integer" && slices.Contains(schema.Types, "number"))) {
-				return fmt.Errorf("type: %s has type %q, want one of %q",
+				return fmt.Errorf("type: %v has type %q, want one of %q",
 					instance, gotType, strings.Join(schema.Types, ", "))
 			}
 		}
@@ -145,12 +145,12 @@ func (st *state) validate(instance reflect.Value, schema *Schema, callerAnns *an
 		str := instance.String()
 		n := utf8.RuneCountInString(str)
 		if schema.MinLength != nil {
-			if m := int(*schema.MinLength); n < m {
+			if m := *schema.MinLength; n < m {
 				return fmt.Errorf("minLength: %q contains %d Unicode code points, fewer than %d", str, n, m)
 			}
 		}
 		if schema.MaxLength != nil {
-			if m := int(*schema.MaxLength); n > m {
+			if m := *schema.MaxLength; n > m {
 				return fmt.Errorf("maxLength: %q contains %d Unicode code points, more than %d", str, n, m)
 			}
 		}
@@ -268,7 +268,7 @@ func (st *state) validate(instance reflect.Value, schema *Schema, callerAnns *an
 					anns.noteIndex(i)
 				}
 			}
-			if nContains == 0 && (schema.MinContains == nil || int(*schema.MinContains) > 0) {
+			if nContains == 0 && (schema.MinContains == nil || *schema.MinContains > 0) {
 				return fmt.Errorf("contains: %s does not have an item matching %s",
 					instance, schema.Contains)
 			}
@@ -277,23 +277,23 @@ func (st *state) validate(instance reflect.Value, schema *Schema, callerAnns *an
 		// https://json-schema.org/draft/2020-12/draft-bhutton-json-schema-validation-01#section-6.4
 		// TODO(jba): check that these next four keywords' values are integers.
 		if schema.MinContains != nil && schema.Contains != nil {
-			if m := int(*schema.MinContains); nContains < m {
+			if m := *schema.MinContains; nContains < m {
 				return fmt.Errorf("minContains: contains validated %d items, less than %d", nContains, m)
 			}
 		}
 		if schema.MaxContains != nil && schema.Contains != nil {
-			if m := int(*schema.MaxContains); nContains > m {
+			if m := *schema.MaxContains; nContains > m {
 				return fmt.Errorf("maxContains: contains validated %d items, greater than %d", nContains, m)
 			}
 		}
 		if schema.MinItems != nil {
-			if m := int(*schema.MinItems); instance.Len() < m {
+			if m := *schema.MinItems; instance.Len() < m {
 				return fmt.Errorf("minItems: array length %d is less than %d", instance.Len(), m)
 			}
 		}
 		if schema.MaxItems != nil {
-			if m := int(*schema.MaxItems); instance.Len() > m {
-				return fmt.Errorf("minItems: array length %d is greater than %d", instance.Len(), m)
+			if m := *schema.MaxItems; instance.Len() > m {
+				return fmt.Errorf("maxItems: array length %d is greater than %d", instance.Len(), m)
 			}
 		}
 		if schema.UniqueItems {
@@ -319,6 +319,142 @@ func (st *state) validate(instance reflect.Value, schema *Schema, callerAnns *an
 				}
 			}
 			anns.allItems = true
+		}
+	}
+
+	// objects
+	// https://json-schema.org/draft/2020-12/json-schema-core#section-10.3.2
+	if instance.Kind() == reflect.Map {
+		if kt := instance.Type().Key(); kt.Kind() != reflect.String {
+			return fmt.Errorf("map key type %s is not a string", kt)
+		}
+		// Track the evaluated properties for just this schema, to support additionalProperties.
+		// If we used anns here, then we'd be including properties evaluated in subschemas
+		// from allOf, etc., which additionalProperties shouldn't observe.
+		evalProps := map[string]bool{}
+		for prop, schema := range schema.Properties {
+			val := instance.MapIndex(reflect.ValueOf(prop))
+			if !val.IsValid() {
+				// It's OK if the instance doesn't have the property.
+				continue
+			}
+			if err := st.validate(val, schema, nil, append(path, prop)); err != nil {
+				return err
+			}
+			evalProps[prop] = true
+		}
+		if len(schema.PatternProperties) > 0 {
+			for vprop, val := range instance.Seq2() {
+				prop := vprop.String()
+				// Check every matching pattern.
+				for pattern, schema := range schema.PatternProperties {
+					// TODO(jba): pre-compile regexps
+					m, err := regexp.MatchString(pattern, prop)
+					if err != nil {
+						return err
+					}
+					if m {
+						if err := st.validate(val, schema, nil, append(path, prop)); err != nil {
+							return err
+						}
+						evalProps[prop] = true
+					}
+				}
+			}
+		}
+		if schema.AdditionalProperties != nil {
+			// Apply to all properties not handled above.
+			for vprop, val := range instance.Seq2() {
+				prop := vprop.String()
+				if !evalProps[prop] {
+					if err := st.validate(val, schema.AdditionalProperties, nil, append(path, prop)); err != nil {
+						return err
+					}
+					evalProps[prop] = true
+				}
+			}
+		}
+		anns.noteProperties(evalProps)
+		if schema.PropertyNames != nil {
+			for prop := range instance.Seq() {
+				if err := st.validate(prop, schema.PropertyNames, nil, append(path, prop.String())); err != nil {
+					return err
+				}
+			}
+		}
+
+		// https://json-schema.org/draft/2020-12/draft-bhutton-json-schema-validation-01#section-6.5
+		if schema.MinProperties != nil {
+			if n, m := instance.Len(), *schema.MinProperties; n < m {
+				return fmt.Errorf("minProperties: object has %d properties, less than %d", n, m)
+			}
+		}
+		if schema.MaxProperties != nil {
+			if n, m := instance.Len(), *schema.MaxProperties; n > m {
+				return fmt.Errorf("maxProperties: object has %d properties, greater than %d", n, m)
+			}
+		}
+
+		hasProperty := func(prop string) bool {
+			return instance.MapIndex(reflect.ValueOf(prop)).IsValid()
+		}
+
+		missingProperties := func(props []string) []string {
+			var missing []string
+			for _, p := range props {
+				if !hasProperty(p) {
+					missing = append(missing, p)
+				}
+			}
+			return missing
+		}
+
+		if schema.Required != nil {
+			if m := missingProperties(schema.Required); len(m) > 0 {
+				return fmt.Errorf("required: missing properties: %q", m)
+			}
+		}
+		if schema.DependentRequired != nil {
+			// "Validation succeeds if, for each name that appears in both the instance
+			// and as a name within this keyword's value, every item in the corresponding
+			// array is also the name of a property in the instance." §6.5.4
+			for dprop, reqs := range schema.DependentRequired {
+				if hasProperty(dprop) {
+					if m := missingProperties(reqs); len(m) > 0 {
+						return fmt.Errorf("dependentRequired[%q]: missing properties %q", dprop, m)
+					}
+				}
+			}
+		}
+
+		// https://json-schema.org/draft/2020-12/json-schema-core#section-10.2.2.4
+		if schema.DependentSchemas != nil {
+			// This does not collect annotations, although it seems like it should.
+			for dprop, ss := range schema.DependentSchemas {
+				if hasProperty(dprop) {
+					// TODO: include dependentSchemas[dprop] in the errors.
+					err := st.validate(instance, ss, &anns, path)
+					if err != nil {
+						return err
+					}
+				}
+			}
+		}
+		if schema.UnevaluatedProperties != nil && !anns.allProperties {
+			// This looks a lot like AdditionalProperties, but depends on in-place keywords like allOf
+			// in addition to sibling keywords.
+			for vprop, val := range instance.Seq2() {
+				prop := vprop.String()
+				if !anns.evaluatedProperties[prop] {
+					if err := st.validate(val, schema.UnevaluatedProperties, nil, append(path, prop)); err != nil {
+						return err
+					}
+				}
+			}
+			// The spec says the annotation should be the set of evaluated properties, but we can optimize
+			// by setting a single boolean, since after this succeeds all properties will be validated.
+			// See https://json-schema.slack.com/archives/CT7FF623C/p1745592564381459.
+			anns.allProperties = true
 		}
 	}
 
