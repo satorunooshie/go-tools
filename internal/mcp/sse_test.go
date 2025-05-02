@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"golang.org/x/tools/internal/mcp/internal/protocol"
 )
 
 func TestSSEServer(t *testing.T) {
@@ -31,26 +32,25 @@ func TestSSEServer(t *testing.T) {
 				}
 			}
 			httpServer := httptest.NewServer(sseHandler)
+			defer httpServer.Close()
 
-			clientTransport, err := NewSSEClientTransport(httpServer.URL)
-			if err != nil {
+			clientTransport := NewSSEClientTransport(httpServer.URL)
+
+			c := NewClient("testClient", "v1.0.0", nil)
+			if err := c.Connect(ctx, clientTransport, nil); err != nil {
 				t.Fatal(err)
 			}
-
-			client := NewClient("testClient", "v1.0.0", nil)
-			sc, err := client.Connect(ctx, clientTransport, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := sc.Ping(ctx); err != nil {
+			if err := c.Ping(ctx); err != nil {
 				t.Fatal(err)
 			}
 			cc := <-clients
-			gotHi, err := sc.CallTool(ctx, "greet", hiParams{"user"})
+			gotHi, err := c.CallTool(ctx, "greet", map[string]any{"name": "user"})
 			if err != nil {
 				t.Fatal(err)
 			}
-			wantHi := []Content{TextContent{Text: "hi user"}}
+			wantHi := &protocol.CallToolResult{
+				Content: []protocol.Content{{Type: "text", Text: "hi user"}},
+			}
 			if diff := cmp.Diff(wantHi, gotHi); diff != "" {
 				t.Errorf("tools/call 'greet' mismatch (-want +got):\n%s", diff)
 			}
@@ -58,11 +58,11 @@ func TestSSEServer(t *testing.T) {
 			// Test that closing either end of the connection terminates the other
 			// end.
 			if closeServerFirst {
-				sc.Close()
+				c.Close()
 				cc.Wait()
 			} else {
 				cc.Close()
-				sc.Wait()
+				c.Wait()
 			}
 		})
 	}

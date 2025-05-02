@@ -12,17 +12,27 @@ import (
 	"os"
 
 	"golang.org/x/tools/internal/mcp"
+	"golang.org/x/tools/internal/mcp/internal/protocol"
 )
 
 var httpAddr = flag.String("http", "", "if set, use SSE HTTP at this address, instead of stdin/stdout")
 
-type SayHiParams struct {
-	Name string `json:"name" mcp:"the name to say hi to"`
+type HiParams struct {
+	Name string `json:"name"`
 }
 
-func SayHi(ctx context.Context, cc *mcp.ClientConnection, params *SayHiParams) ([]mcp.Content, error) {
+func SayHi(ctx context.Context, cc *mcp.ClientConnection, params *HiParams) ([]mcp.Content, error) {
 	return []mcp.Content{
 		mcp.TextContent{Text: "Hi " + params.Name},
+	}, nil
+}
+
+func PromptHi(ctx context.Context, cc *mcp.ClientConnection, params *HiParams) (*protocol.GetPromptResult, error) {
+	return &protocol.GetPromptResult{
+		Description: "Code review prompt",
+		Messages: []protocol.PromptMessage{
+			{Role: "user", Content: mcp.TextContent{Text: "Say hi to " + params.Name}.ToWire()},
+		},
 	}, nil
 }
 
@@ -30,7 +40,10 @@ func main() {
 	flag.Parse()
 
 	server := mcp.NewServer("greeter", "v0.0.1", nil)
-	server.AddTools(mcp.MakeTool("greet", "say hi", SayHi))
+	server.AddTools(mcp.MakeTool("greet", "say hi", SayHi, mcp.Input(
+		mcp.Property("name", mcp.Description("the name to say hi to")),
+	)))
+	server.AddPrompts(mcp.MakePrompt("greet", "", PromptHi))
 
 	if *httpAddr != "" {
 		handler := mcp.NewSSEHandler(func(*http.Request) *mcp.Server {
