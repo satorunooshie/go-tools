@@ -9,8 +9,9 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"golang.org/x/tools/internal/mcp"
-	"golang.org/x/tools/internal/mcp/internal/jsonschema"
+	"golang.org/x/tools/internal/mcp/jsonschema"
 )
 
 // testToolHandler is used for type inference in TestMakeTool.
@@ -82,7 +83,7 @@ func TestMakeTool(t *testing.T) {
 		},
 	}
 	for _, test := range tests {
-		if diff := cmp.Diff(test.want, test.tool.Definition.InputSchema); diff != "" {
+		if diff := cmp.Diff(test.want, test.tool.Definition.InputSchema, cmpopts.IgnoreUnexported(jsonschema.Schema{})); diff != "" {
 			t.Errorf("MakeTool(%v) mismatch (-want +got):\n%s", test.tool.Definition.Name, diff)
 		}
 	}

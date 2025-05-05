@@ -15,8 +15,9 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
-	"golang.org/x/tools/internal/mcp/internal/jsonschema"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"golang.org/x/tools/internal/mcp/internal/protocol"
+	"golang.org/x/tools/internal/mcp/jsonschema"
 )
 
 type hiParams struct {
@@ -149,7 +150,7 @@ func TestEndToEnd(t *testing.T) {
 			AdditionalProperties: falseSchema,
 		},
 	}}
-	if diff := cmp.Diff(wantTools, gotTools); diff != "" {
+	if diff := cmp.Diff(wantTools, gotTools, cmpopts.IgnoreUnexported(jsonschema.Schema{})); diff != "" {
 		t.Fatalf("tools/list mismatch (-want +got):\n%s", diff)
 	}
 
