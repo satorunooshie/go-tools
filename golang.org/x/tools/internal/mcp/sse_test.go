@@ -12,7 +12,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"golang.org/x/tools/internal/mcp/internal/protocol"
+	"golang.org/x/tools/internal/mcp/protocol"
 )
 
 func TestSSEServer(t *testing.T) {
@@ -36,8 +36,8 @@ func TestSSEServer(t *testing.T) {
 
 			clientTransport := NewSSEClientTransport(httpServer.URL)
 
-			c := NewClient("testClient", "v1.0.0", nil)
-			if err := c.Connect(ctx, clientTransport, nil); err != nil {
+			c := NewClient("testClient", "v1.0.0", clientTransport, nil)
+			if err := c.Start(ctx); err != nil {
 				t.Fatal(err)
 			}
 			if err := c.Ping(ctx); err != nil {

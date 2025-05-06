@@ -15,7 +15,7 @@ import (
 	"sync"
 
 	jsonrpc2 "golang.org/x/tools/internal/jsonrpc2_v2"
-	"golang.org/x/tools/internal/mcp/internal/protocol"
+	"golang.org/x/tools/internal/mcp/protocol"
 	"golang.org/x/tools/internal/xcontext"
 )
 
@@ -27,7 +27,7 @@ var ErrConnectionClosed = errors.New("connection closed")
 // and server.
 //
 // Transports should be used for at most one call to [Server.Connect] or
-// [Client.Connect].
+// [Client.Start].
 type Transport interface {
 	// Connect returns the logical stream.
 	//
