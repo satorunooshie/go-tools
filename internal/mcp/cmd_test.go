@@ -13,7 +13,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"golang.org/x/tools/internal/mcp"
-	"golang.org/x/tools/internal/mcp/internal/protocol"
+	"golang.org/x/tools/internal/mcp/protocol"
 )
 
 const runAsServer = "_MCP_RUN_AS_SERVER"
@@ -49,8 +49,8 @@ func TestCmdTransport(t *testing.T) {
 	cmd := exec.Command(exe)
 	cmd.Env = append(os.Environ(), runAsServer+"=true")
 
-	client := mcp.NewClient("client", "v0.0.1", nil)
-	if err := client.Connect(ctx, mcp.NewCommandTransport(cmd), nil); err != nil {
+	client := mcp.NewClient("client", "v0.0.1", mcp.NewCommandTransport(cmd), nil)
+	if err := client.Start(ctx); err != nil {
 		log.Fatal(err)
 	}
 	got, err := client.CallTool(ctx, "greet", map[string]any{"name": "user"})
