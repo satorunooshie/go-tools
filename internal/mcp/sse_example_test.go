@@ -18,7 +18,7 @@ type AddParams struct {
 	X, Y int
 }
 
-func Add(ctx context.Context, cc *mcp.ClientConnection, params *AddParams) ([]mcp.Content, error) {
+func Add(ctx context.Context, cc *mcp.ServerConnection, params *AddParams) ([]mcp.Content, error) {
 	return []mcp.Content{
 		mcp.TextContent{Text: fmt.Sprintf("%d", params.X+params.Y)},
 	}, nil
@@ -26,7 +26,7 @@ func Add(ctx context.Context, cc *mcp.ClientConnection, params *AddParams) ([]mc
 
 func ExampleSSEHandler() {
 	server := mcp.NewServer("adder", "v0.0.1", nil)
-	server.AddTools(mcp.MakeTool("add", "add two numbers", Add))
+	server.AddTools(mcp.NewTool("add", "add two numbers", Add))
 
 	handler := mcp.NewSSEHandler(func(*http.Request) *mcp.Server { return server })
 	httpServer := httptest.NewServer(handler)

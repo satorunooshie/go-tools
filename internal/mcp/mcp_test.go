@@ -24,7 +24,7 @@ type hiParams struct {
 	Name string
 }
 
-func sayHi(ctx context.Context, cc *ClientConnection, v hiParams) ([]Content, error) {
+func sayHi(ctx context.Context, cc *ServerConnection, v hiParams) ([]Content, error) {
 	if err := cc.Ping(ctx); err != nil {
 		return nil, fmt.Errorf("ping failed: %v", err)
 	}
@@ -38,18 +38,18 @@ func TestEndToEnd(t *testing.T) {
 	s := NewServer("testServer", "v1.0.0", nil)
 
 	// The 'greet' tool says hi.
-	s.AddTools(MakeTool("greet", "say hi", sayHi))
+	s.AddTools(NewTool("greet", "say hi", sayHi))
 
 	// The 'fail' tool returns this error.
 	failure := errors.New("mcp failure")
 	s.AddTools(
-		MakeTool("fail", "just fail", func(context.Context, *ClientConnection, struct{}) ([]Content, error) {
+		NewTool("fail", "just fail", func(context.Context, *ServerConnection, struct{}) ([]Content, error) {
 			return nil, failure
 		}),
 	)
 
 	s.AddPrompts(
-		MakePrompt("code_review", "do a code review", func(_ context.Context, _ *ClientConnection, params struct{ Code string }) (*protocol.GetPromptResult, error) {
+		NewPrompt("code_review", "do a code review", func(_ context.Context, _ *ServerConnection, params struct{ Code string }) (*protocol.GetPromptResult, error) {
 			return &protocol.GetPromptResult{
 				Description: "Code review prompt",
 				Messages: []protocol.PromptMessage{
@@ -57,7 +57,7 @@ func TestEndToEnd(t *testing.T) {
 				},
 			}, nil
 		}),
-		MakePrompt("fail", "", func(_ context.Context, _ *ClientConnection, params struct{}) (*protocol.GetPromptResult, error) {
+		NewPrompt("fail", "", func(_ context.Context, _ *ServerConnection, params struct{}) (*protocol.GetPromptResult, error) {
 			return nil, failure
 		}),
 	)
@@ -195,7 +195,7 @@ func TestEndToEnd(t *testing.T) {
 //
 // The caller should cancel either the client connection or server connection
 // when the connections are no longer needed.
-func basicConnection(t *testing.T, tools ...*Tool) (*ClientConnection, *Client) {
+func basicConnection(t *testing.T, tools ...*Tool) (*ServerConnection, *Client) {
 	t.Helper()
 
 	ctx := context.Background()
@@ -218,7 +218,7 @@ func basicConnection(t *testing.T, tools ...*Tool) (*ClientConnection, *Client) 
 }
 
 func TestServerClosing(t *testing.T) {
-	cc, c := basicConnection(t, MakeTool("greet", "say hi", sayHi))
+	cc, c := basicConnection(t, NewTool("greet", "say hi", sayHi))
 	defer c.Close()
 
 	ctx := context.Background()
@@ -283,7 +283,7 @@ func TestCancellation(t *testing.T) {
 		cancelled = make(chan struct{}, 1) // don't block the request
 	)
 
-	slowRequest := func(ctx context.Context, cc *ClientConnection, v struct{}) ([]Content, error) {
+	slowRequest := func(ctx context.Context, cc *ServerConnection, v struct{}) ([]Content, error) {
 		start <- struct{}{}
 		select {
 		case <-ctx.Done():
@@ -293,7 +293,7 @@ func TestCancellation(t *testing.T) {
 		}
 		return nil, nil
 	}
-	_, sc := basicConnection(t, MakeTool("slow", "a slow request", slowRequest))
+	_, sc := basicConnection(t, NewTool("slow", "a slow request", slowRequest))
 	defer sc.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
