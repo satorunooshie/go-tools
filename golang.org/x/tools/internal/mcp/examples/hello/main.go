@@ -21,13 +21,13 @@ type HiParams struct {
 	Name string `json:"name"`
 }
 
-func SayHi(ctx context.Context, cc *mcp.ClientConnection, params *HiParams) ([]mcp.Content, error) {
+func SayHi(ctx context.Context, cc *mcp.ServerConnection, params *HiParams) ([]mcp.Content, error) {
 	return []mcp.Content{
 		mcp.TextContent{Text: "Hi " + params.Name},
 	}, nil
 }
 
-func PromptHi(ctx context.Context, cc *mcp.ClientConnection, params *HiParams) (*protocol.GetPromptResult, error) {
+func PromptHi(ctx context.Context, cc *mcp.ServerConnection, params *HiParams) (*protocol.GetPromptResult, error) {
 	return &protocol.GetPromptResult{
 		Description: "Code review prompt",
 		Messages: []protocol.PromptMessage{
@@ -40,10 +40,10 @@ func main() {
 	flag.Parse()
 
 	server := mcp.NewServer("greeter", "v0.0.1", nil)
-	server.AddTools(mcp.MakeTool("greet", "say hi", SayHi, mcp.Input(
+	server.AddTools(mcp.NewTool("greet", "say hi", SayHi, mcp.Input(
 		mcp.Property("name", mcp.Description("the name to say hi to")),
 	)))
-	server.AddPrompts(mcp.MakePrompt("greet", "", PromptHi))
+	server.AddPrompts(mcp.NewPrompt("greet", "", PromptHi))
 
 	if *httpAddr != "" {
 		handler := mcp.NewSSEHandler(func(*http.Request) *mcp.Server {
