@@ -115,8 +115,11 @@ type Schema struct {
 	// The parent base URI at top level is where the schema was loaded from, or
 	// if not loaded, then it should be provided to Schema.Resolve.
 	baseURI *url.URL
+	// The schema to which Ref refers.
+	resolvedRef *Schema
 	// map from anchors to subschemas
-	anchors           map[string]*Schema
+	anchors map[string]*Schema
+	// compiled regexps
 	pattern           *regexp.Regexp
 	patternProperties map[*regexp.Regexp]*Schema
 }
@@ -293,7 +296,7 @@ func Ptr[T any](x T) *T { return &x }
 // It stops when f returns false.
 func (s *Schema) every(f func(*Schema) bool) bool {
 	return s == nil ||
-		f(s) && s.everyChild(f)
+		f(s) && s.everyChild(func(s *Schema) bool { return s.every(f) })
 }
 
 // everyChild reports whether f is true for every immediate child schema of s.

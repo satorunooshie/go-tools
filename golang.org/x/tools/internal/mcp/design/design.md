@@ -56,13 +56,30 @@ SDKs, but is consistent with Go packages like `net/http`, `net/rpc`, or
 Functionality that is not directly related to MCP (like jsonschema or jsonrpc2)
 belongs in a separate package.
 
+Therefore, this is the package layout. `module.path` is a placeholder for the
+final module path of the mcp module
+
+- `module.path/mcp`: the bulk of the user facing API
+- `module.path/mcp/protocol`: generated types for the MCP spec.
+- `module.path/jsonschema`: a jsonschema implementation, with validation
+- `module.path/internal/jsonrpc2`: a fork of x/tools/internal/jsonrpc2_v2
+
+For now, this layout assumes we want to separate the 'protocol' types from the
+'mcp' package, since they won't be needed by most users. It is unclear whether
+this is worthwhile.
+
+The JSON-RPC implementation is hidden, to avoid tight coupling. As described in
+the next section, the only aspects of JSON-RPC that need to be exposed in the
+SDK are the message types, for the purposes of defining custom transports. We
+can expose these types from the `mcp` package via aliases or wrappers.
+
 ### jsonrpc2 and Transports
 
 The MCP is defined in terms of client-server communication over bidirectional
 JSON-RPC message streams. Specifically, version `2025-03-26` of the spec
 defines two transports:
 
-- **stdio**: communication with a subprocess over stdin/stdout.
+- ****: communication with a subprocess over stdin/stdout.
 - **streamable http**: communication over a relatively complicated series of
   text/event-stream GET and HTTP POST requests.
 
@@ -128,7 +145,7 @@ type CommandTransport struct { /* unexported fields */ }
 func NewCommandTransport(cmd *exec.Command) *CommandTransport
 
 // Connect starts the command, and connects to it over stdin/stdout.
-func (t *CommandTransport) Connect(ctx context.Context) (Stream, error) {
+func (*CommandTransport) Connect(ctx context.Context) (Stream, error) {
 ```
 
 The `StdIOTransport` is the server side of the stdio transport, and connects by
@@ -139,7 +156,7 @@ binding to `os.Stdin` and `os.Stdout`.
 // JSON over stdin/stdout.
 type StdIOTransport struct { /* unexported fields */ }
 
-func NewStdIOTransport() *StdIOTransport {
+func NewStdIOTransport() *StdIOTransport
 
 func (t *StdIOTransport) Connect(context.Context) (Stream, error)
 ```
@@ -174,17 +191,136 @@ Notably absent are options to hook into the request handling for the purposes
 of authentication or context injection. These concerns are better handled using
 standard HTTP middleware patterns.
 
-<!--
-TODO: consider ways to expose the /mcp handler and /messages handler
-separately, so that users can compose them differently. For example, should we
-expose an SSEServerHandler, similar to the typescript SDK?
--->
+By default, the SSE handler creates messages endpoints with the
+`?sessionId=...` query parameter. Users that want more control over the
+management of sessions and session endpoints may write their own handler, and
+create `SSEServerTransport` instances themselves, for incoming GET requests.
 
-<!-- TODO: add an API for the streamable HTTP handler -->
+```go
+// A SSEServerTransport is a logical SSE session created through a hanging GET
+// request.
+//
+// When connected, it it returns the following [Stream] implementation:
+//   - Writes are SSE 'message' events to the GET response.
+//   - Reads are received from POSTs to the session endpoint, via
+//     [SSEServerTransport.ServeHTTP].
+//   - Close terminates the hanging GET.
+type SSEServerTransport struct { /* ... */ }
+
+// NewSSEServerTransport creates a new SSE transport for the given messages
+// endpoint, and hanging GET response.
+//
+// Use [SSEServerTransport.Connect] to initiate the flow of messages.
+//
+// The transport is itself an [http.Handler]. It is the caller's responsibility
+// to ensure that the resulting transport serves HTTP requests on the given
+// session endpoint.
+func NewSSEServerTransport(endpoint string, w http.ResponseWriter) *SSEServerTransport
+
+// ServeHTTP handles POST requests to the transport endpoint.
+func (*SSEServerTransport) ServeHTTP(w http.ResponseWriter, req *http.Request)
+
+// Connect sends the 'endpoint' event to the client.
+// See [SSEServerTransport] for more details on the [Stream] implementation.
+func (*SSEServerTransport) Connect(context.Context) (Stream, error)
+```
+
+The SSE client transport is simpler, and hopefully self-explanatory.
+
+```go
+type SSEClientTransport struct { /* ... */ }
+
+// NewSSEClientTransport returns a new client transport that connects to the
+// SSE server at the provided URL.
+//
+// NewSSEClientTransport panics if the given URL is invalid.
+func NewSSEClientTransport(url string) *SSEClientTransport {
+
+// Connect connects through the client endpoint.
+func (*SSEClientTransport) Connect(ctx context.Context) (Stream, error)
+```
+
+The Streamable HTTP transports are similar to the SSE transport, albeit with a
+more complicated implementation. For brevity, we summarize only the differences
+from the equivalent SSE types:
+
+```go
+// The StreamableHandler interface is symmetrical to the SSEHandler.
+type StreamableHandler struct { /* unexported fields */ }
+func NewStreamableHandler(getServer func(request *http.Request) *Server) *StreamableHandler
+func (*StreamableHandler) ServeHTTP(w http.ResponseWriter, req *http.Request)
+func (*StreamableHandler) Close() error
+
+// Unlike the SSE transport, the streamable transport constructor accepts a
+// session ID, not an endpoint, along with the http response for the request
+// that created the session. It is the caller's responsibility to delegate
+// requests to this session.
+type StreamableServerTransport struct { /* ... */ }
+func NewStreamableServerTransport(sessionID string, w http.ResponseWriter) *StreamableServerTransport
+func (*StreamableServerTransport) ServeHTTP(w http.ResponseWriter, req *http.Request)
+func (*StreamableServerTransport) Connect(context.Context) (Stream, error)
+
+// The streamable client handles reconnection transparently to the user.
+type StreamableClientTransport struct { /* ... */ }
+func NewStreamableClientTransport(url string) *StreamableClientTransport {
+func (*StreamableClientTransport) Connect(context.Context) (Stream, error)
+```
 
 ### Protocol types
 
-<!-- TODO: describe the generation of protocol types from the MCP schema -->
+As described in the section on package layout above, the `protocol` package
+will contain definitions of types referenced by the MCP spec that are needed
+for the SDK. JSON-RPC message types are elided, since they are handled by the
+`jsonrpc2` package and should not be observed by the user. The user interacts
+only with the params/result types relevant to MCP operations.
+
+For user-provided data, use `json.RawMessage`, so that
+marshalling/unmarshalling can be delegated to the business logic of the client
+or server.
+
+For union types, which can't be represented in Go (specifically `Content` and
+`Resource`), we prefer distinguished unions: struct types with fields
+corresponding to the union of all properties for union elements.
+
+These types will be auto-generated from the [JSON schema of the MCP
+spec](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/2025-03-26/schema.json).
+For brevity, only a few examples are shown here:
+
+```go
+type CallToolParams struct {
+	Arguments map[string]json.RawMessage `json:"arguments,omitempty"`
+	Name      string                     `json:"name"`
+}
+
+type CallToolResult struct {
+	Meta    map[string]json.RawMessage `json:"_meta,omitempty"`
+	Content []Content                  `json:"content"`
+	IsError bool                       `json:"isError,omitempty"`
+}
+
+// Content is the wire format for content.
+//
+// The Type field distinguishes the type of the content.
+// At most one of Text, MIMEType, Data, and Resource is non-zero.
+type Content struct {
+	Type     string    `json:"type"`
+	Text     string    `json:"text,omitempty"`
+	MIMEType string    `json:"mimeType,omitempty"`
+	Data     string    `json:"data,omitempty"`
+	Resource *Resource `json:"resource,omitempty"`
+}
+
+// Resource is the wire format for embedded resources.
+//
+// The URI field describes the resource location. At most one of Text and Blob
+// is non-zero.
+type Resource struct {
+	URI      string  `json:"uri,"`
+	MIMEType string  `json:"mimeType,omitempty"`
+	Text     string  `json:"text"`
+	Blob     *string `json:"blob"`
+}
+```
 
 ### Clients and Servers
 
@@ -271,12 +407,60 @@ Server.RemoveResources
 
 ### Logging
 
-<!-- TODO: needs design -->
+Servers have access to a `slog.Logger` that writes to the client. A call to
+a log method like `Info`is translated to a `LoggingMessageNotification` as
+follows:
+
+- An attribute with key "logger" is used to populate the "logger" field of the notification.
+
+- The remaining attributes and the message populate the "data" field with the
+  output of a `slog.JSONHandler`: The result is always a JSON object, with the
+  key "msg" for the message.
+
+- The standard slog levels `Info`, `Debug`, `Warn` and `Error` map to the
+  corresponding levels in the MCP spec. The other spec levels will be mapped
+  to integers between the slog levels. For example, "notice" is level 2 because
+  it is between "warning" (slog value 4) and "info" (slog value 0).
+  The `mcp` package defines consts for these levels. To log at the "notice"
+  level, a server would call `Log(ctx, mcp.LevelNotice, "message")`.
 
 ### Pagination
 
 <!-- TODO: needs design -->
 
-## Compatibility with existing SDKs
+## Differences with mcp-go
 
-<!-- TODO: describe delta with other SDKs such as mcp-go -->
+The most popular MCP package for Go is [mcp-go](https://pkg.go.dev/github.com/
+mark3labs/mcp-go). While we admire the thoughfulness of its design and the high
+quality of its implementation, we made different choices. Although the APIs are
+not compatible, translating between them is straightforward. (Later, we will
+provide a detailed translation guide.)
+
+## Packages
+
+As we mentioned above, we decided to put most of the API into a single package.
+The exceptions are the JSON-RPC layer, the JSON Schema implementation, and the
+parts of the MCP protocol that users don't need. The resulting `mcp` includes
+all the functionality of mcp-go's `mcp`, `client`, `server` and `transport`
+packages, but is smaller than the `mcp` package alone.
+
+## Hooks
+
+Version 0.26.0 of mcp-go defines 24 server hooks. Each hook consists of a field
+in the `Hooks` struct, a `Hooks.Add` method, and a type for the hook function.
+As described above, these can be replaced by middleware. We
+don't define any middleware types at present, but will do so if there is demand.
+(We're minimalists, not savages.)
+
+## Servers
+
+In mcp-go, server authors create an `MCPServer`, populate it with tools,
+resources and so on, and then wrap it in an `SSEServer` or `StdioServer`. These
+also use session IDs, which are exposed. Users can manage their own sessions
+with `RegisterSession` and `UnregisterSession`.
+
+We find the similarity in names among the three server types to be confusing,
+and we could not discover any uses of the session methods in the open-source
+ecosystem. In our design is similar, server authors create a `Server`, and then
+connect it to a `Transport` or SSE handler. We manage multiple web clients for a
+single server using session IDs internally, but do not expose them.
