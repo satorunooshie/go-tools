@@ -968,7 +968,7 @@ func newEnv(t *testing.T, cache *cache.Cache, files, proxyFiles map[string][]byt
 	ctx = debug.WithInstance(ctx)
 
 	awaiter := integration.NewAwaiter(sandbox.Workdir)
-	ss := lsprpc.NewStreamServer(cache, false, nil)
+	ss := lsprpc.NewStreamServer(cache, false, nil, nil)
 	server := servertest.NewPipeServer(ss, jsonrpc2.NewRawStream)
 	editor, err := fake.NewEditor(sandbox, config).Connect(ctx, server, awaiter.Hooks())
 	if err != nil {
@@ -1591,7 +1591,7 @@ func completeMarker(mark marker, src protocol.Location, want ...completionItem) 
 		want = nil // got is nil if empty
 	}
 	if diff := cmp.Diff(want, got); diff != "" {
-		mark.errorf("Completion(...) returned unexpect results (-want +got):\n%s", diff)
+		mark.errorf("Completion(...) returned unexpected results (-want +got):\n%s", diff)
 	}
 }
 

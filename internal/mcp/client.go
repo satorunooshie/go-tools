@@ -9,10 +9,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sync"
 
 	jsonrpc2 "golang.org/x/tools/internal/jsonrpc2_v2"
-	"golang.org/x/tools/internal/mcp/protocol"
 )
 
 // A Client is an MCP client, which may be connected to an MCP server
@@ -24,7 +24,8 @@ type Client struct {
 	opts             ClientOptions
 	mu               sync.Mutex
 	conn             *jsonrpc2.Connection
-	initializeResult *protocol.InitializeResult
+	roots            *featureSet[Root]
+	initializeResult *initializeResult
 }
 
 // NewClient creates a new Client.
@@ -37,6 +38,7 @@ func NewClient(name, version string, t Transport, opts *ClientOptions) *Client {
 		name:      name,
 		version:   version,
 		transport: t,
+		roots:     newFeatureSet(func(r Root) string { return r.URI }),
 	}
 	if opts != nil {
 		c.opts = *opts
@@ -81,13 +83,13 @@ func (c *Client) Start(ctx context.Context) (err error) {
 	if err != nil {
 		return err
 	}
-	params := &protocol.InitializeParams{
-		ClientInfo: protocol.Implementation{Name: c.name, Version: c.version},
+	params := &initializeParams{
+		ClientInfo: implementation{Name: c.name, Version: c.version},
 	}
 	if err := call(ctx, c.conn, "initialize", params, &c.initializeResult); err != nil {
 		return err
 	}
-	if err := c.conn.Notify(ctx, "notifications/initialized", &protocol.InitializedParams{}); err != nil {
+	if err := c.conn.Notify(ctx, "notifications/initialized", &initializedParams{}); err != nil {
 		return err
 	}
 	return nil
@@ -106,13 +108,47 @@ func (c *Client) Wait() error {
 	return c.conn.Wait()
 }
 
-func (*Client) handle(ctx context.Context, req *jsonrpc2.Request) (any, error) {
+// AddRoots adds the given roots to the client,
+// replacing any with the same URIs,
+// and notifies any connected servers.
+// TODO: notification
+func (c *Client) AddRoots(roots ...Root) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.roots.add(roots...)
+}
+
+// RemoveRoots removes the roots with the given URIs,
+// and notifies any connected servers if the list has changed.
+// It is not an error to remove a nonexistent root.
+// TODO: notification
+func (c *Client) RemoveRoots(uris ...string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.roots.remove(uris...)
+}
+
+func (c *Client) listRoots(_ context.Context, _ *ListRootsParams) (*ListRootsResult, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return &ListRootsResult{
+		Roots: slices.Collect(c.roots.all()),
+	}, nil
+}
+
+func (c *Client) handle(ctx context.Context, req *jsonrpc2.Request) (any, error) {
+	// TODO: when we switch to ClientSessions, use a copy of the server's dispatch function, or
+	// maybe just add another type parameter.
+	//
 	// No need to check that the connection is initialized, since we initialize
 	// it in Connect.
 	switch req.Method {
 	case "ping":
 		// The spec says that 'ping' expects an empty object result.
 		return struct{}{}, nil
+	case "roots/list":
+		// ListRootsParams happens to be unused.
+		return c.listRoots(ctx, nil)
 	}
 	return nil, jsonrpc2.ErrNotHandled
 }
@@ -123,10 +159,10 @@ func (c *Client) Ping(ctx context.Context) error {
 }
 
 // ListPrompts lists prompts that are currently available on the server.
-func (c *Client) ListPrompts(ctx context.Context) ([]protocol.Prompt, error) {
+func (c *Client) ListPrompts(ctx context.Context) ([]Prompt, error) {
 	var (
-		params = &protocol.ListPromptsParams{}
-		result protocol.ListPromptsResult
+		params = &ListPromptsParams{}
+		result ListPromptsResult
 	)
 	if err := call(ctx, c.conn, "prompts/list", params, &result); err != nil {
 		return nil, err
@@ -135,13 +171,13 @@ func (c *Client) ListPrompts(ctx context.Context) ([]protocol.Prompt, error) {
 }
 
 // GetPrompt gets a prompt from the server.
-func (c *Client) GetPrompt(ctx context.Context, name string, args map[string]string) (*protocol.GetPromptResult, error) {
+func (c *Client) GetPrompt(ctx context.Context, name string, args map[string]string) (*GetPromptResult, error) {
 	var (
-		params = &protocol.GetPromptParams{
+		params = &GetPromptParams{
 			Name:      name,
 			Arguments: args,
 		}
-		result = &protocol.GetPromptResult{}
+		result = &GetPromptResult{}
 	)
 	if err := call(ctx, c.conn, "prompts/get", params, result); err != nil {
 		return nil, err
@@ -150,10 +186,10 @@ func (c *Client) GetPrompt(ctx context.Context, name string, args map[string]str
 }
 
 // ListTools lists tools that are currently available on the server.
-func (c *Client) ListTools(ctx context.Context) ([]protocol.Tool, error) {
+func (c *Client) ListTools(ctx context.Context) ([]Tool, error) {
 	var (
-		params = &protocol.ListToolsParams{}
-		result protocol.ListToolsResult
+		params = &ListToolsParams{}
+		result ListToolsResult
 	)
 	if err := call(ctx, c.conn, "tools/list", params, &result); err != nil {
 		return nil, err
@@ -162,11 +198,7 @@ func (c *Client) ListTools(ctx context.Context) ([]protocol.Tool, error) {
 }
 
 // CallTool calls the tool with the given name and arguments.
-//
-// TODO(jba): make the following true:
-// If the provided arguments do not conform to the schema for the given tool,
-// the call fails.
-func (c *Client) CallTool(ctx context.Context, name string, args map[string]any) (_ *protocol.CallToolResult, err error) {
+func (c *Client) CallTool(ctx context.Context, name string, args map[string]any) (_ *CallToolResult, err error) {
 	defer func() {
 		if err != nil {
 			err = fmt.Errorf("calling tool %q: %w", name, err)
@@ -180,14 +212,27 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]any)
 		}
 		argsJSON[name] = argJSON
 	}
-	var (
-		params = &protocol.CallToolParams{
-			Name:      name,
-			Arguments: argsJSON,
-		}
-		result protocol.CallToolResult
-	)
-	if err := call(ctx, c.conn, "tools/call", params, &result); err != nil {
+
+	params := &CallToolParams{
+		Name:      name,
+		Arguments: argsJSON,
+	}
+	return standardCall[CallToolResult](ctx, c.conn, "tools/call", params)
+}
+
+// ListResources lists the resources that are currently available on the server.
+func (c *Client) ListResources(ctx context.Context, params *ListResourcesParams) (*ListResourcesResult, error) {
+	return standardCall[ListResourcesResult](ctx, c.conn, "resources/list", params)
+}
+
+// ReadResource ask the server to read a resource and return its contents.
+func (c *Client) ReadResource(ctx context.Context, params *ReadResourceParams) (*ReadResourceResult, error) {
+	return standardCall[ReadResourceResult](ctx, c.conn, "resources/read", params)
+}
+
+func standardCall[TRes, TParams any](ctx context.Context, conn *jsonrpc2.Connection, method string, params TParams) (*TRes, error) {
+	var result TRes
+	if err := call(ctx, conn, method, params, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
