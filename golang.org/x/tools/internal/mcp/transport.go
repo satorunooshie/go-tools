@@ -15,7 +15,6 @@ import (
 	"sync"
 
 	jsonrpc2 "golang.org/x/tools/internal/jsonrpc2_v2"
-	"golang.org/x/tools/internal/mcp/protocol"
 	"golang.org/x/tools/internal/xcontext"
 )
 
@@ -131,7 +130,7 @@ type canceller struct {
 // Preempt implements jsonrpc2.Preempter.
 func (c *canceller) Preempt(ctx context.Context, req *jsonrpc2.Request) (result any, err error) {
 	if req.Method == "notifications/cancelled" {
-		var params protocol.CancelledParams
+		var params CancelledParams
 		if err := json.Unmarshal(req.Params, &params); err != nil {
 			return nil, err
 		}
@@ -147,6 +146,8 @@ func (c *canceller) Preempt(ctx context.Context, req *jsonrpc2.Request) (result 
 // call executes and awaits a jsonrpc2 call on the given connection,
 // translating errors into the mcp domain.
 func call(ctx context.Context, conn *jsonrpc2.Connection, method string, params, result any) error {
+	// TODO: the "%w"s in this function effectively make jsonrpc2.WireError part of the API.
+	// Consider alternatives.
 	call := conn.Call(ctx, method, params)
 	err := call.Await(ctx, result)
 	switch {
@@ -154,13 +155,13 @@ func call(ctx context.Context, conn *jsonrpc2.Connection, method string, params,
 		return fmt.Errorf("calling %q: %w", method, ErrConnectionClosed)
 	case ctx.Err() != nil:
 		// Notify the peer of cancellation.
-		err := conn.Notify(xcontext.Detach(ctx), "notifications/cancelled", &protocol.CancelledParams{
+		err := conn.Notify(xcontext.Detach(ctx), "notifications/cancelled", &CancelledParams{
 			Reason:    ctx.Err().Error(),
 			RequestID: call.ID().Raw(),
 		})
 		return errors.Join(ctx.Err(), err)
 	case err != nil:
-		return fmt.Errorf("calling %q: %v", method, err)
+		return fmt.Errorf("calling %q: %w", method, err)
 	}
 	return nil
 }

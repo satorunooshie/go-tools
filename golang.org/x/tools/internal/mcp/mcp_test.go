@@ -16,8 +16,8 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	jsonrpc2 "golang.org/x/tools/internal/jsonrpc2_v2"
 	"golang.org/x/tools/internal/mcp/jsonschema"
-	"golang.org/x/tools/internal/mcp/protocol"
 )
 
 type hiParams struct {
@@ -28,7 +28,7 @@ func sayHi(ctx context.Context, cc *ServerConnection, v hiParams) ([]Content, er
 	if err := cc.Ping(ctx); err != nil {
 		return nil, fmt.Errorf("ping failed: %v", err)
 	}
-	return []Content{TextContent{Text: "hi " + v.Name}}, nil
+	return []Content{NewTextContent("hi " + v.Name)}, nil
 }
 
 func TestEndToEnd(t *testing.T) {
@@ -49,21 +49,21 @@ func TestEndToEnd(t *testing.T) {
 	)
 
 	s.AddPrompts(
-		NewPrompt("code_review", "do a code review", func(_ context.Context, _ *ServerConnection, params struct{ Code string }) (*protocol.GetPromptResult, error) {
-			return &protocol.GetPromptResult{
+		NewPrompt("code_review", "do a code review", func(_ context.Context, _ *ServerConnection, params struct{ Code string }) (*GetPromptResult, error) {
+			return &GetPromptResult{
 				Description: "Code review prompt",
-				Messages: []protocol.PromptMessage{
-					{Role: "user", Content: TextContent{Text: "Please review the following code: " + params.Code}.ToWire()},
+				Messages: []PromptMessage{
+					{Role: "user", Content: NewTextContent("Please review the following code: " + params.Code)},
 				},
 			}, nil
 		}),
-		NewPrompt("fail", "", func(_ context.Context, _ *ServerConnection, params struct{}) (*protocol.GetPromptResult, error) {
+		NewPrompt("fail", "", func(_ context.Context, _ *ServerConnection, params struct{}) (*GetPromptResult, error) {
 			return nil, failure
 		}),
 	)
 
 	// Connect the server.
-	cc, err := s.Connect(ctx, st, nil)
+	sc, err := s.Connect(ctx, st, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,13 +75,14 @@ func TestEndToEnd(t *testing.T) {
 	var clientWG sync.WaitGroup
 	clientWG.Add(1)
 	go func() {
-		if err := cc.Wait(); err != nil {
+		if err := sc.Wait(); err != nil {
 			t.Errorf("server failed: %v", err)
 		}
 		clientWG.Done()
 	}()
 
 	c := NewClient("testClient", "v1.0.0", ct, nil)
+	c.AddRoots(Root{URI: "file:///root"})
 
 	// Connect the client.
 	if err := c.Start(ctx); err != nil {
@@ -91,96 +92,179 @@ func TestEndToEnd(t *testing.T) {
 	if err := c.Ping(ctx); err != nil {
 		t.Fatalf("ping failed: %v", err)
 	}
-
-	gotPrompts, err := c.ListPrompts(ctx)
-	if err != nil {
-		t.Errorf("prompts/list failed: %v", err)
-	}
-	wantPrompts := []protocol.Prompt{
-		{
-			Name:        "code_review",
-			Description: "do a code review",
-			Arguments:   []protocol.PromptArgument{{Name: "Code", Required: true}},
-		},
-		{Name: "fail"},
-	}
-	if diff := cmp.Diff(wantPrompts, gotPrompts); diff != "" {
-		t.Fatalf("prompts/list mismatch (-want +got):\n%s", diff)
-	}
-
-	gotReview, err := c.GetPrompt(ctx, "code_review", map[string]string{"Code": "1+1"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	wantReview := &protocol.GetPromptResult{
-		Description: "Code review prompt",
-		Messages: []protocol.PromptMessage{{
-			Content: TextContent{Text: "Please review the following code: 1+1"}.ToWire(),
-			Role:    "user",
-		}},
-	}
-	if diff := cmp.Diff(wantReview, gotReview); diff != "" {
-		t.Errorf("prompts/get 'code_review' mismatch (-want +got):\n%s", diff)
-	}
-
-	if _, err := c.GetPrompt(ctx, "fail", map[string]string{}); err == nil || !strings.Contains(err.Error(), failure.Error()) {
-		t.Errorf("fail returned unexpected error: got %v, want containing %v", err, failure)
-	}
-
-	gotTools, err := c.ListTools(ctx)
-	if err != nil {
-		t.Errorf("tools/list failed: %v", err)
-	}
-	wantTools := []protocol.Tool{
-		{
-			Name:        "fail",
-			Description: "just fail",
-			InputSchema: &jsonschema.Schema{
-				Type:                 "object",
-				AdditionalProperties: falseSchema,
+	t.Run("prompts", func(t *testing.T) {
+		gotPrompts, err := c.ListPrompts(ctx)
+		if err != nil {
+			t.Errorf("prompts/list failed: %v", err)
+		}
+		wantPrompts := []Prompt{
+			{
+				Name:        "code_review",
+				Description: "do a code review",
+				Arguments:   []PromptArgument{{Name: "Code", Required: true}},
 			},
-		},
-		{
-			Name:        "greet",
-			Description: "say hi",
-			InputSchema: &jsonschema.Schema{
-				Type:     "object",
-				Required: []string{"Name"},
-				Properties: map[string]*jsonschema.Schema{
-					"Name": {Type: "string"},
+			{Name: "fail"},
+		}
+		if diff := cmp.Diff(wantPrompts, gotPrompts); diff != "" {
+			t.Fatalf("prompts/list mismatch (-want +got):\n%s", diff)
+		}
+
+		gotReview, err := c.GetPrompt(ctx, "code_review", map[string]string{"Code": "1+1"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantReview := &GetPromptResult{
+			Description: "Code review prompt",
+			Messages: []PromptMessage{{
+				Content: NewTextContent("Please review the following code: 1+1"),
+				Role:    "user",
+			}},
+		}
+		if diff := cmp.Diff(wantReview, gotReview); diff != "" {
+			t.Errorf("prompts/get 'code_review' mismatch (-want +got):\n%s", diff)
+		}
+
+		if _, err := c.GetPrompt(ctx, "fail", map[string]string{}); err == nil || !strings.Contains(err.Error(), failure.Error()) {
+			t.Errorf("fail returned unexpected error: got %v, want containing %v", err, failure)
+		}
+	})
+
+	t.Run("tools", func(t *testing.T) {
+		gotTools, err := c.ListTools(ctx)
+		if err != nil {
+			t.Errorf("tools/list failed: %v", err)
+		}
+		wantTools := []Tool{
+			{
+				Name:        "fail",
+				Description: "just fail",
+				InputSchema: &jsonschema.Schema{
+					Type:                 "object",
+					AdditionalProperties: falseSchema,
 				},
-				AdditionalProperties: falseSchema,
 			},
-		},
-	}
-	if diff := cmp.Diff(wantTools, gotTools, cmpopts.IgnoreUnexported(jsonschema.Schema{})); diff != "" {
-		t.Fatalf("tools/list mismatch (-want +got):\n%s", diff)
-	}
+			{
+				Name:        "greet",
+				Description: "say hi",
+				InputSchema: &jsonschema.Schema{
+					Type:     "object",
+					Required: []string{"Name"},
+					Properties: map[string]*jsonschema.Schema{
+						"Name": {Type: "string"},
+					},
+					AdditionalProperties: falseSchema,
+				},
+			},
+		}
+		if diff := cmp.Diff(wantTools, gotTools, cmpopts.IgnoreUnexported(jsonschema.Schema{})); diff != "" {
+			t.Fatalf("tools/list mismatch (-want +got):\n%s", diff)
+		}
 
-	gotHi, err := c.CallTool(ctx, "greet", map[string]any{"name": "user"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	wantHi := &protocol.CallToolResult{
-		Content: []protocol.Content{{Type: "text", Text: "hi user"}},
-	}
-	if diff := cmp.Diff(wantHi, gotHi); diff != "" {
-		t.Errorf("tools/call 'greet' mismatch (-want +got):\n%s", diff)
-	}
+		gotHi, err := c.CallTool(ctx, "greet", map[string]any{"name": "user"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantHi := &CallToolResult{
+			Content: []Content{{Type: "text", Text: "hi user"}},
+		}
+		if diff := cmp.Diff(wantHi, gotHi); diff != "" {
+			t.Errorf("tools/call 'greet' mismatch (-want +got):\n%s", diff)
+		}
 
-	gotFail, err := c.CallTool(ctx, "fail", map[string]any{})
-	// Counter-intuitively, when a tool fails, we don't expect an RPC error for
-	// call tool: instead, the failure is embedded in the result.
-	if err != nil {
-		t.Fatal(err)
-	}
-	wantFail := &protocol.CallToolResult{
-		IsError: true,
-		Content: []protocol.Content{{Type: "text", Text: failure.Error()}},
-	}
-	if diff := cmp.Diff(wantFail, gotFail); diff != "" {
-		t.Errorf("tools/call 'fail' mismatch (-want +got):\n%s", diff)
-	}
+		gotFail, err := c.CallTool(ctx, "fail", map[string]any{})
+		// Counter-intuitively, when a tool fails, we don't expect an RPC error for
+		// call tool: instead, the failure is embedded in the result.
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantFail := &CallToolResult{
+			IsError: true,
+			Content: []Content{{Type: "text", Text: failure.Error()}},
+		}
+		if diff := cmp.Diff(wantFail, gotFail); diff != "" {
+			t.Errorf("tools/call 'fail' mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("resources", func(t *testing.T) {
+		resource1 := Resource{
+			Name:     "public",
+			MIMEType: "text/plain",
+			URI:      "file:///file1.txt",
+		}
+		resource2 := Resource{
+			Name:     "public", // names are not unique IDs
+			MIMEType: "text/plain",
+			URI:      "file:///nonexistent.txt",
+		}
+
+		readHandler := func(_ context.Context, r Resource, _ *ReadResourceParams) (*ReadResourceResult, error) {
+			if r.URI == "file:///file1.txt" {
+				return &ReadResourceResult{
+					Contents: &ResourceContents{
+						Text: "file contents",
+					},
+				}, nil
+			}
+			return nil, ResourceNotFoundError(r.URI)
+		}
+		s.AddResources(
+			&ServerResource{resource1, readHandler},
+			&ServerResource{resource2, readHandler})
+
+		lrres, err := c.ListResources(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if diff := cmp.Diff([]Resource{resource1, resource2}, lrres.Resources); diff != "" {
+			t.Errorf("resources/list mismatch (-want, +got):\n%s", diff)
+		}
+
+		for _, tt := range []struct {
+			uri      string
+			mimeType string // "": not found; "text/plain": resource; "text/template": template
+		}{
+			{"file:///file1.txt", "text/plain"},
+			{"file:///nonexistent.txt", ""},
+			// TODO(jba): add resource template cases when we implement them
+		} {
+			rres, err := c.ReadResource(ctx, &ReadResourceParams{URI: tt.uri})
+			if err != nil {
+				var werr *jsonrpc2.WireError
+				if errors.As(err, &werr) && werr.Code == codeResourceNotFound {
+					if tt.mimeType != "" {
+						t.Errorf("%s: not found but expected it to be", tt.uri)
+					}
+				} else {
+					t.Fatalf("reading %s: %v", tt.uri, err)
+				}
+			} else {
+				if got := rres.Contents.URI; got != tt.uri {
+					t.Errorf("got uri %q, want %q", got, tt.uri)
+				}
+				if got := rres.Contents.MIMEType; got != tt.mimeType {
+					t.Errorf("%s: got MIME type %q, want %q", tt.uri, got, tt.mimeType)
+				}
+			}
+		}
+	})
+	t.Run("roots", func(t *testing.T) {
+		// Take the server's first ServerConnection.
+		var sc *ServerConnection
+		for sc = range s.Clients() {
+			break
+		}
+
+		rootRes, err := sc.ListRoots(ctx, &ListRootsParams{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		gotRoots := rootRes.Roots
+		wantRoots := slices.Collect(c.roots.all())
+		if diff := cmp.Diff(wantRoots, gotRoots); diff != "" {
+			t.Errorf("roots/list mismatch (-want +got):\n%s", diff)
+		}
+	})
 
 	// Disconnect.
 	c.Close()
@@ -198,7 +282,7 @@ func TestEndToEnd(t *testing.T) {
 //
 // The caller should cancel either the client connection or server connection
 // when the connections are no longer needed.
-func basicConnection(t *testing.T, tools ...*Tool) (*ServerConnection, *Client) {
+func basicConnection(t *testing.T, tools ...*ServerTool) (*ServerConnection, *Client) {
 	t.Helper()
 
 	ctx := context.Background()
