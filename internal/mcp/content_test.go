@@ -14,7 +14,7 @@ import (
 
 func TestContent(t *testing.T) {
 	tests := []struct {
-		in   mcp.Content
+		in   *mcp.Content
 		want string // json serialization
 	}{
 		{mcp.NewTextContent("hello"), `{"type":"text","text":"hello"}`},
@@ -48,12 +48,55 @@ func TestContent(t *testing.T) {
 		if diff := cmp.Diff(test.want, string(got)); diff != "" {
 			t.Errorf("json.Marshal(%v) mismatch (-want +got):\n%s", test.in, diff)
 		}
-		var out mcp.Content
+		var out *mcp.Content
 		if err := json.Unmarshal(got, &out); err != nil {
 			t.Fatal(err)
 		}
 		if diff := cmp.Diff(test.in, out); diff != "" {
 			t.Errorf("json.Unmarshal(%q) mismatch (-want +got):\n%s", string(got), diff)
+		}
+	}
+}
+
+func TestResourceContents(t *testing.T) {
+	for _, tt := range []struct {
+		rc   mcp.ResourceContents
+		want string // marshaled JSON
+	}{
+		{
+			mcp.ResourceContents{URI: "u", Text: "t"},
+			`{"uri":"u","text":"t"}`,
+		},
+		{
+			mcp.ResourceContents{URI: "u", MIMEType: "m", Text: "t"},
+			`{"uri":"u","mimeType":"m","text":"t"}`,
+		},
+		{
+			mcp.ResourceContents{URI: "u", Text: "", Blob: nil},
+			`{"uri":"u","text":""}`,
+		},
+		{
+			mcp.ResourceContents{URI: "u", Blob: []byte{}},
+			`{"uri":"u","blob":""}`,
+		},
+		{
+			mcp.ResourceContents{URI: "u", Blob: []byte{1}},
+			`{"uri":"u","blob":"AQ=="}`,
+		},
+	} {
+		data, err := json.Marshal(tt.rc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := string(data); got != tt.want {
+			t.Errorf("%#v:\ngot  %s\nwant %s", tt.rc, got, tt.want)
+		}
+		var urc mcp.ResourceContents
+		if err := json.Unmarshal(data, &urc); err != nil {
+			t.Fatal(err)
+		}
+		if diff := cmp.Diff(tt.rc, urc); diff != "" {
+			t.Errorf("mismatch (-want, +got):\n%s", diff)
 		}
 	}
 }

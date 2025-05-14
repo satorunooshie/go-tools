@@ -20,16 +20,16 @@ type HiParams struct {
 	Name string `json:"name"`
 }
 
-func SayHi(ctx context.Context, cc *mcp.ServerConnection, params *HiParams) ([]mcp.Content, error) {
-	return []mcp.Content{
+func SayHi(ctx context.Context, cc *mcp.ServerSession, params *HiParams) ([]*mcp.Content, error) {
+	return []*mcp.Content{
 		mcp.NewTextContent("Hi " + params.Name),
 	}, nil
 }
 
-func PromptHi(ctx context.Context, cc *mcp.ServerConnection, params *HiParams) (*mcp.GetPromptResult, error) {
+func PromptHi(ctx context.Context, cc *mcp.ServerSession, params *HiParams) (*mcp.GetPromptResult, error) {
 	return &mcp.GetPromptResult{
 		Description: "Code review prompt",
-		Messages: []mcp.PromptMessage{
+		Messages: []*mcp.PromptMessage{
 			{Role: "user", Content: mcp.NewTextContent("Say hi to " + params.Name)},
 		},
 	}, nil
@@ -50,8 +50,8 @@ func main() {
 		})
 		http.ListenAndServe(*httpAddr, handler)
 	} else {
-		opts := &mcp.ConnectionOptions{Logger: os.Stderr}
-		if err := server.Run(context.Background(), mcp.NewStdIOTransport(), opts); err != nil {
+		t := mcp.NewLoggingTransport(mcp.NewStdIOTransport(), os.Stderr)
+		if err := server.Run(context.Background(), t); err != nil {
 			fmt.Fprintf(os.Stderr, "Server failed: %v", err)
 		}
 	}

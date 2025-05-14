@@ -13,12 +13,12 @@ import (
 )
 
 // A ToolHandler handles a call to tools/call.
-type ToolHandler func(context.Context, *ServerConnection, map[string]json.RawMessage) (*CallToolResult, error)
+type ToolHandler func(context.Context, *ServerSession, *CallToolParams) (*CallToolResult, error)
 
 // A Tool is a tool definition that is bound to a tool handler.
 type ServerTool struct {
-	Definition Tool
-	Handler    ToolHandler
+	Tool    *Tool
+	Handler ToolHandler
 }
 
 // NewTool is a helper to make a tool using reflection on the given handler.
@@ -34,20 +34,14 @@ type ServerTool struct {
 //
 // TODO: just have the handler return a CallToolResult: returning []Content is
 // going to be inconsistent with other server features.
-func NewTool[TReq any](name, description string, handler func(context.Context, *ServerConnection, TReq) ([]Content, error), opts ...ToolOption) *ServerTool {
+func NewTool[TReq any](name, description string, handler func(context.Context, *ServerSession, TReq) ([]*Content, error), opts ...ToolOption) *ServerTool {
 	schema, err := jsonschema.For[TReq]()
 	if err != nil {
 		panic(err)
 	}
-	wrapped := func(ctx context.Context, cc *ServerConnection, args map[string]json.RawMessage) (*CallToolResult, error) {
-		// For simplicity, just marshal and unmarshal the arguments.
-		// This could be avoided in the future.
-		rawArgs, err := json.Marshal(args)
-		if err != nil {
-			return nil, err
-		}
+	wrapped := func(ctx context.Context, cc *ServerSession, params *CallToolParams) (*CallToolResult, error) {
 		var v TReq
-		if err := unmarshalSchema(rawArgs, schema, &v); err != nil {
+		if err := unmarshalSchema(params.Arguments, schema, &v); err != nil {
 			return nil, err
 		}
 		content, err := handler(ctx, cc, v)
@@ -55,7 +49,7 @@ func NewTool[TReq any](name, description string, handler func(context.Context, *
 		// rather than returned as jsonrpc2 server errors.
 		if err != nil {
 			return &CallToolResult{
-				Content: []Content{NewTextContent(err.Error())},
+				Content: []*Content{NewTextContent(err.Error())},
 				IsError: true,
 			}, nil
 		}
@@ -65,7 +59,7 @@ func NewTool[TReq any](name, description string, handler func(context.Context, *
 		return res, nil
 	}
 	t := &ServerTool{
-		Definition: Tool{
+		Tool: &Tool{
 			Name:        name,
 			Description: description,
 			InputSchema: schema,
@@ -100,7 +94,7 @@ func (s toolSetter) set(t *ServerTool) { s(t) }
 func Input(opts ...SchemaOption) ToolOption {
 	return toolSetter(func(t *ServerTool) {
 		for _, opt := range opts {
-			opt.set(t.Definition.InputSchema)
+			opt.set(t.Tool.InputSchema)
 		}
 	})
 }

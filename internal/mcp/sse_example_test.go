@@ -18,8 +18,8 @@ type AddParams struct {
 	X, Y int
 }
 
-func Add(ctx context.Context, cc *mcp.ServerConnection, params *AddParams) ([]mcp.Content, error) {
-	return []mcp.Content{
+func Add(ctx context.Context, cc *mcp.ServerSession, params *AddParams) ([]*mcp.Content, error) {
+	return []*mcp.Content{
 		mcp.NewTextContent(fmt.Sprintf("%d", params.X+params.Y)),
 	}, nil
 }
@@ -34,13 +34,14 @@ func ExampleSSEHandler() {
 
 	ctx := context.Background()
 	transport := mcp.NewSSEClientTransport(httpServer.URL)
-	client := mcp.NewClient("test", "v1.0.0", transport, nil)
-	if err := client.Start(ctx); err != nil {
+	client := mcp.NewClient("test", "v1.0.0", nil)
+	cs, err := client.Connect(ctx, transport)
+	if err != nil {
 		log.Fatal(err)
 	}
-	defer client.Close()
+	defer cs.Close()
 
-	res, err := client.CallTool(ctx, "add", map[string]any{"x": 1, "y": 2})
+	res, err := cs.CallTool(ctx, "add", map[string]any{"x": 1, "y": 2}, nil)
 	if err != nil {
 		log.Fatal(err)
 	}

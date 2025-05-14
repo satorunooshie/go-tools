@@ -16,12 +16,12 @@ import (
 )
 
 // A PromptHandler handles a call to prompts/get.
-type PromptHandler func(context.Context, *ServerConnection, map[string]string) (*GetPromptResult, error)
+type PromptHandler func(context.Context, *ServerSession, map[string]string) (*GetPromptResult, error)
 
 // A Prompt is a prompt definition bound to a prompt handler.
 type ServerPrompt struct {
-	Definition Prompt
-	Handler    PromptHandler
+	Prompt  *Prompt
+	Handler PromptHandler
 }
 
 // NewPrompt is a helper to use reflection to create a prompt for the given
@@ -32,7 +32,7 @@ type ServerPrompt struct {
 // of type string or *string. The argument names for the resulting prompt
 // definition correspond to the JSON names of the request fields, and any
 // fields that are not marked "omitempty" are considered required.
-func NewPrompt[TReq any](name, description string, handler func(context.Context, *ServerConnection, TReq) (*GetPromptResult, error), opts ...PromptOption) *ServerPrompt {
+func NewPrompt[TReq any](name, description string, handler func(context.Context, *ServerSession, TReq) (*GetPromptResult, error), opts ...PromptOption) *ServerPrompt {
 	schema, err := jsonschema.For[TReq]()
 	if err != nil {
 		panic(err)
@@ -41,7 +41,7 @@ func NewPrompt[TReq any](name, description string, handler func(context.Context,
 		panic(fmt.Sprintf("handler request type must be a struct"))
 	}
 	prompt := &ServerPrompt{
-		Definition: Prompt{
+		Prompt: &Prompt{
 			Name:        name,
 			Description: description,
 		},
@@ -54,13 +54,13 @@ func NewPrompt[TReq any](name, description string, handler func(context.Context,
 		if prop.Type != "string" {
 			panic(fmt.Sprintf("handler type must consist only of string fields"))
 		}
-		prompt.Definition.Arguments = append(prompt.Definition.Arguments, PromptArgument{
+		prompt.Prompt.Arguments = append(prompt.Prompt.Arguments, &PromptArgument{
 			Name:        name,
 			Description: prop.Description,
 			Required:    required[name],
 		})
 	}
-	prompt.Handler = func(ctx context.Context, cc *ServerConnection, args map[string]string) (*GetPromptResult, error) {
+	prompt.Handler = func(ctx context.Context, cc *ServerSession, args map[string]string) (*GetPromptResult, error) {
 		// For simplicity, just marshal and unmarshal the arguments.
 		// This could be avoided in the future.
 		rawArgs, err := json.Marshal(args)
@@ -95,16 +95,16 @@ func (s promptSetter) set(p *ServerPrompt) { s(p) }
 // Required and Description, and panics when encountering any other option.
 func Argument(name string, opts ...SchemaOption) PromptOption {
 	return promptSetter(func(p *ServerPrompt) {
-		i := slices.IndexFunc(p.Definition.Arguments, func(arg PromptArgument) bool {
+		i := slices.IndexFunc(p.Prompt.Arguments, func(arg *PromptArgument) bool {
 			return arg.Name == name
 		})
-		var arg PromptArgument
+		var arg *PromptArgument
 		if i < 0 {
-			i = len(p.Definition.Arguments)
-			arg = PromptArgument{Name: name}
-			p.Definition.Arguments = append(p.Definition.Arguments, arg)
+			i = len(p.Prompt.Arguments)
+			arg = &PromptArgument{Name: name}
+			p.Prompt.Arguments = append(p.Prompt.Arguments, arg)
 		} else {
-			arg = p.Definition.Arguments[i]
+			arg = p.Prompt.Arguments[i]
 		}
 		for _, opt := range opts {
 			switch v := opt.(type) {
@@ -116,6 +116,6 @@ func Argument(name string, opts ...SchemaOption) PromptOption {
 				panic(fmt.Sprintf("unsupported prompt argument schema option %T", opt))
 			}
 		}
-		p.Definition.Arguments[i] = arg
+		p.Prompt.Arguments[i] = arg
 	})
 }
