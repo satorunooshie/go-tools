@@ -6,10 +6,10 @@ package mcp
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"iter"
 	"net/url"
+	"path/filepath"
 	"slices"
 	"sync"
 
@@ -26,12 +26,12 @@ type Server struct {
 	version string
 	opts    ServerOptions
 
-	mu            sync.Mutex
-	prompts       *featureSet[*ServerPrompt]
-	tools         *featureSet[*ServerTool]
-	resources     *featureSet[*ServerResource]
-	sessions      []*ServerSession
-	methodHandler ServerMethodHandler
+	mu             sync.Mutex
+	prompts        *featureSet[*ServerPrompt]
+	tools          *featureSet[*ServerTool]
+	resources      *featureSet[*ServerResource]
+	sessions       []*ServerSession
+	methodHandler_ MethodHandler[ServerSession]
 }
 
 // ServerOptions is used to configure behavior of the server.
@@ -51,13 +51,13 @@ func NewServer(name, version string, opts *ServerOptions) *Server {
 		opts = new(ServerOptions)
 	}
 	return &Server{
-		name:          name,
-		version:       version,
-		opts:          *opts,
-		prompts:       newFeatureSet(func(p *ServerPrompt) string { return p.Prompt.Name }),
-		tools:         newFeatureSet(func(t *ServerTool) string { return t.Tool.Name }),
-		resources:     newFeatureSet(func(r *ServerResource) string { return r.Resource.URI }),
-		methodHandler: defaulMethodHandler,
+		name:           name,
+		version:        version,
+		opts:           *opts,
+		prompts:        newFeatureSet(func(p *ServerPrompt) string { return p.Prompt.Name }),
+		tools:          newFeatureSet(func(t *ServerTool) string { return t.Tool.Name }),
+		resources:      newFeatureSet(func(r *ServerResource) string { return r.Resource.URI }),
+		methodHandler_: defaultMethodHandler[ServerSession],
 	}
 }
 
@@ -101,34 +101,6 @@ func (s *Server) RemoveTools(names ...string) {
 	if s.tools.remove(names...) {
 		// TODO: notify
 	}
-}
-
-// ResourceNotFoundError returns an error indicating that a resource being read could
-// not be found.
-func ResourceNotFoundError(uri string) error {
-	return &jsonrpc2.WireError{
-		Code:    codeResourceNotFound,
-		Message: "Resource not found",
-		Data:    json.RawMessage(fmt.Sprintf(`{"uri":%q}`, uri)),
-	}
-}
-
-// The error code to return when a resource isn't found.
-// See https://modelcontextprotocol.io/specification/2025-03-26/server/resources#error-handling
-// However, the code they chose in in the wrong space
-// (see https://github.com/modelcontextprotocol/modelcontextprotocol/issues/509).
-// so we pick a different one, arbirarily for now (until they fix it).
-// The immediate problem is that jsonprc2 defines -32002 as "server closing".
-const codeResourceNotFound = -31002
-
-// A ResourceHandler is a function that reads a resource.
-// If it cannot find the resource, it should return the result of calling [ResourceNotFoundError].
-type ResourceHandler func(context.Context, *ServerSession, *ReadResourceParams) (*ReadResourceResult, error)
-
-// A ServerResource associates a Resource with its handler.
-type ServerResource struct {
-	Resource *Resource
-	Handler  ResourceHandler
 }
 
 // AddResource adds the given resource to the server and associates it with
@@ -247,6 +219,49 @@ func (s *Server) readResource(ctx context.Context, ss *ServerSession, params *Re
 	return res, nil
 }
 
+// FileResourceHandler returns a ReadResourceHandler that reads paths using dir as
+// a base directory.
+// It honors client roots and protects against path traversal attacks.
+//
+// The dir argument should be a filesystem path. It need not be absolute, but
+// that is recommended to avoid a dependency on the current working directory (the
+// check against client roots is done with an absolute path). If dir is not absolute
+// and the current working directory is unavailable, FileResourceHandler panics.
+//
+// Lexical path traversal attacks, where the path has ".." elements that escape dir,
+// are always caught. Go 1.24 and above also protects against symlink-based attacks,
+// where symlinks under dir lead out of the tree.
+func (s *Server) FileResourceHandler(dir string) ResourceHandler {
+	// Convert dir to an absolute path.
+	dirFilepath, err := filepath.Abs(dir)
+	if err != nil {
+		panic(err)
+	}
+	return func(ctx context.Context, ss *ServerSession, params *ReadResourceParams) (_ *ReadResourceResult, err error) {
+		defer func() {
+			if err != nil {
+				err = fmt.Errorf("reading resource %s: %w", params.URI, err)
+			}
+		}()
+
+		// TODO: use a memoizing API here.
+		rootRes, err := ss.ListRoots(ctx, nil)
+		if err != nil {
+			return nil, fmt.Errorf("listing roots: %w", err)
+		}
+		roots, err := fileRoots(rootRes.Roots)
+		if err != nil {
+			return nil, err
+		}
+		data, err := readFileResource(params.URI, dirFilepath, roots)
+		if err != nil {
+			return nil, err
+		}
+		// TODO(jba): figure out mime type.
+		return &ReadResourceResult{Contents: NewBlobResourceContents(params.URI, "text/plain", data)}, nil
+	}
+}
+
 // Run runs the server over the given transport, which must be persistent.
 //
 // Run blocks until the client terminates the connection.
@@ -305,98 +320,56 @@ type ServerSession struct {
 
 // Ping pings the client.
 func (ss *ServerSession) Ping(ctx context.Context, _ *PingParams) error {
-	return call(ctx, ss.conn, "ping", nil, nil)
+	return call(ctx, ss.conn, "ping", (*PingParams)(nil), nil)
 }
 
 // ListRoots lists the client roots.
 func (ss *ServerSession) ListRoots(ctx context.Context, params *ListRootsParams) (*ListRootsResult, error) {
-	return standardCall[ListRootsResult](ctx, ss.conn, "roots/list", params)
+	return standardCall[ListRootsResult](ctx, ss.conn, methodListRoots, params)
 }
 
-// A ServerMethodHandler handles MCP messages from client to server.
-// The params argument is an XXXParams struct pointer, such as *GetPromptParams.
-// For methods, a MethodHandler must return either
-// an XXResult struct pointer and a nil error, or
-// nil with a non-nil error.
-// For notifications, a MethodHandler must return nil, nil.
-type ServerMethodHandler func(ctx context.Context, _ *ServerSession, method string, params any) (result any, err error)
+// CreateMessage sends a sampling request to the client.
+func (ss *ServerSession) CreateMessage(ctx context.Context, params *CreateMessageParams) (*CreateMessageResult, error) {
+	return standardCall[CreateMessageResult](ctx, ss.conn, methodCreateMessage, params)
+}
 
 // AddMiddleware wraps the server's current method handler using the provided
 // middleware. Middleware is applied from right to left, so that the first one
 // is executed first.
 //
-// For example, AddMiddleware(m1, m2, m3) augments the server handler as
+// For example, AddMiddleware(m1, m2, m3) augments the server method handler as
 // m1(m2(m3(handler))).
-func (s *Server) AddMiddleware(middleware ...func(ServerMethodHandler) ServerMethodHandler) {
+func (s *Server) AddMiddleware(middleware ...Middleware[ServerSession]) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, m := range slices.Backward(middleware) {
-		s.methodHandler = m(s.methodHandler)
-	}
+	addMiddleware(&s.methodHandler_, middleware)
 }
 
-// defaulMethodHandler is the initial method handler installed on the server.
-func defaulMethodHandler(ctx context.Context, ss *ServerSession, method string, params any) (any, error) {
-	info, ok := methodInfos[method]
-	assert(ok, "called with unknown method")
-	return info.handleMethod(ctx, ss, method, params)
-}
-
-// methodInfo is information about invoking a method.
-type methodInfo struct {
-	// unmarshal params from the wire into an XXXParams struct
-	unmarshalParams func(json.RawMessage) (any, error)
-	// run the code for the method
-	handleMethod ServerMethodHandler
-}
-
-// The following definitions support converting from typed to untyped method handlers.
-// Throughout, P is the type parameter for params, and R is the one for result.
-
-// A typedMethodHandler is like a MethodHandler, but with type information.
-type typedMethodHandler[P, R any] func(context.Context, *ServerSession, P) (R, error)
-
-// newMethodInfo creates a methodInfo from a typedMethodHandler.
-func newMethodInfo[P, R any](d typedMethodHandler[P, R]) methodInfo {
-	return methodInfo{
-		unmarshalParams: func(m json.RawMessage) (any, error) {
-			var p P
-			if err := json.Unmarshal(m, &p); err != nil {
-				return nil, err
-			}
-			return p, nil
-		},
-		handleMethod: func(ctx context.Context, ss *ServerSession, _ string, params any) (any, error) {
-			return d(ctx, ss, params.(P))
-		},
-	}
-}
-
-// methodInfos maps from the RPC method name to methodInfos.
-var methodInfos = map[string]methodInfo{
-	"initialize":     newMethodInfo(sessionMethod((*ServerSession).initialize)),
-	"ping":           newMethodInfo(sessionMethod((*ServerSession).ping)),
-	"prompts/list":   newMethodInfo(serverMethod((*Server).listPrompts)),
-	"prompts/get":    newMethodInfo(serverMethod((*Server).getPrompt)),
-	"tools/list":     newMethodInfo(serverMethod((*Server).listTools)),
-	"tools/call":     newMethodInfo(serverMethod((*Server).callTool)),
-	"resources/list": newMethodInfo(serverMethod((*Server).listResources)),
-	"resources/read": newMethodInfo(serverMethod((*Server).readResource)),
+// serverMethodInfos maps from the RPC method name to serverMethodInfos.
+var serverMethodInfos = map[string]methodInfo[ServerSession]{
+	methodInitialize:    newMethodInfo(sessionMethod((*ServerSession).initialize)),
+	methodPing:          newMethodInfo(sessionMethod((*ServerSession).ping)),
+	methodListPrompts:   newMethodInfo(serverMethod((*Server).listPrompts)),
+	methodGetPrompt:     newMethodInfo(serverMethod((*Server).getPrompt)),
+	methodListTools:     newMethodInfo(serverMethod((*Server).listTools)),
+	methodCallTool:      newMethodInfo(serverMethod((*Server).callTool)),
+	methodListResources: newMethodInfo(serverMethod((*Server).listResources)),
+	methodReadResource:  newMethodInfo(serverMethod((*Server).readResource)),
 	// TODO: notifications
 }
 
-// serverMethod is glue for creating a typedMethodHandler from a method on Server.
-func serverMethod[P, R any](f func(*Server, context.Context, *ServerSession, P) (R, error)) typedMethodHandler[P, R] {
-	return func(ctx context.Context, ss *ServerSession, p P) (R, error) {
-		return f(ss.server, ctx, ss, p)
-	}
+// *ServerSession implements the session interface.
+// See toSession for why this interface seems to be necessary.
+var _ session[ServerSession] = (*ServerSession)(nil)
+
+func (ss *ServerSession) methodInfos() map[string]methodInfo[ServerSession] {
+	return serverMethodInfos
 }
 
-// sessionMethod is glue for creating a typedMethodHandler from a method on ServerSession.
-func sessionMethod[P, R any](f func(*ServerSession, context.Context, P) (R, error)) typedMethodHandler[P, R] {
-	return func(ctx context.Context, ss *ServerSession, p P) (R, error) {
-		return f(ss, ctx, p)
-	}
+func (ss *ServerSession) methodHandler() MethodHandler[ServerSession] {
+	ss.server.mu.Lock()
+	defer ss.server.mu.Unlock()
+	return ss.server.methodHandler_
 }
 
 // handle invokes the method described by the given JSON RPC request.
@@ -414,27 +387,10 @@ func (ss *ServerSession) handle(ctx context.Context, req *jsonrpc2.Request) (any
 			return nil, fmt.Errorf("method %q is invalid during session initialization", req.Method)
 		}
 	}
-
-	// TODO: embed the incoming request ID in the client context (or, more likely,
+	// TODO(rfindley): embed the incoming request ID in the client context (or, more likely,
 	// a wrapper around it), so that we can correlate responses and notifications
 	// to the handler; this is required for the new session-based transport.
-	info, ok := methodInfos[req.Method]
-	if !ok {
-		return nil, jsonrpc2.ErrNotHandled
-	}
-	params, err := info.unmarshalParams(req.Params)
-	if err != nil {
-		return nil, fmt.Errorf("ServerSession:handle %q: %w", req.Method, err)
-	}
-	ss.server.mu.Lock()
-	d := ss.server.methodHandler
-	ss.server.mu.Unlock()
-	// d might be user code, so ensure that it returns the right values for the jsonrpc2 protocol.
-	res, err := d(ctx, ss, req.Method, params)
-	if err != nil {
-		return nil, err
-	}
-	return res, nil
+	return handleRequest(ctx, req, ss)
 }
 
 func (ss *ServerSession) initialize(ctx context.Context, params *InitializeParams) (*InitializeResult, error) {
@@ -442,8 +398,8 @@ func (ss *ServerSession) initialize(ctx context.Context, params *InitializeParam
 	ss.initializeParams = params
 	ss.mu.Unlock()
 
-	// Mark the connection as initialized when this method exits. TODO:
-	// Technically, the server should not be considered initialized until it has
+	// Mark the connection as initialized when this method exits.
+	// TODO: Technically, the server should not be considered initialized until it has
 	// *responded*, but we don't have adequate visibility into the jsonrpc2
 	// connection to implement that easily. In any case, once we've initialized
 	// here, we can handle requests.
@@ -472,7 +428,7 @@ func (ss *ServerSession) initialize(ctx context.Context, params *InitializeParam
 	}, nil
 }
 
-func (ss *ServerSession) ping(context.Context, struct{}) (struct{}, error) {
+func (ss *ServerSession) ping(context.Context, *PingParams) (struct{}, error) {
 	return struct{}{}, nil
 }
 

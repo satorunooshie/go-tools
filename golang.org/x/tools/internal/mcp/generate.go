@@ -68,7 +68,14 @@ var declarations = config{
 		Name:   "-",
 		Fields: config{"Params": {Name: "CancelledParams"}},
 	},
-	"ClientCapabilities": {},
+	"ClientCapabilities": {
+		Fields: config{"Sampling": {Name: "SamplingCapabilities"}},
+	},
+	"CreateMessageRequest": {
+		Name:   "-",
+		Fields: config{"Params": {Name: "CreateMessageParams"}},
+	},
+	"CreateMessageResult": {},
 	"GetPromptRequest": {
 		Name:   "-",
 		Fields: config{"Params": {Name: "GetPromptParams"}},
@@ -103,7 +110,9 @@ var declarations = config{
 		Name:   "-",
 		Fields: config{"Params": {Name: "ListToolsParams"}},
 	},
-	"ListToolsResult": {},
+	"ListToolsResult":  {},
+	"ModelHint":        {},
+	"ModelPreferences": {},
 	"PingRequest": {
 		Name:   "-",
 		Fields: config{"Params": {Name: "PingParams"}},
@@ -124,6 +133,8 @@ var declarations = config{
 	"Role":     {},
 	"Root":     {},
 
+	"SamplingCapabilities": {Substitute: "struct{}"},
+	"SamplingMessage":      {},
 	"ServerCapabilities": {
 		Name: "serverCapabilities",
 		Fields: config{
@@ -191,6 +202,24 @@ import (
 		fmt.Fprintln(buf)
 		fmt.Fprint(buf, b.String())
 	}
+	// Write out method names.
+	fmt.Fprintln(buf, `const (`)
+	for name, s := range schema.Definitions {
+		prefix := "method"
+		method, found := strings.CutSuffix(name, "Request")
+		if !found {
+			prefix = "notification"
+			method, found = strings.CutSuffix(name, "Notification")
+		}
+		if found {
+			if ms, ok := s.Properties["method"]; ok {
+				if c := ms.Const; c != nil {
+					fmt.Fprintf(buf, "%s%s = %q\n", prefix, method, *c)
+				}
+			}
+		}
+	}
+	fmt.Fprintln(buf, `)`)
 
 	formatted, err := format.Source(buf.Bytes())
 	if err != nil {
@@ -350,6 +379,11 @@ func writeType(w io.Writer, config *typeConfig, def *jsonschema.Schema, named ma
 					fieldTypeSchema = rs
 				}
 				needPointer := isStruct(fieldTypeSchema)
+				// Special case: there are no sampling capabilities defined, but
+				// we want it to be a struct for future expansion.
+				if !needPointer && name == "sampling" {
+					needPointer = true
+				}
 				if config != nil && config.Fields[export] != nil {
 					r := config.Fields[export]
 					if r.Substitute != "" {
