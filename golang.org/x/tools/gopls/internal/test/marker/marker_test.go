@@ -784,7 +784,12 @@ func loadMarkerTest(name string, content []byte) (*markerTest, error) {
 		files:   make(map[string][]byte),
 		golden:  make(map[expect.Identifier]*Golden),
 	}
+	seen := make(map[string]bool)
 	for _, file := range archive.Files {
+		if seen[file.Name] {
+			return nil, fmt.Errorf("duplicate archive section %q", file.Name)
+		}
+		seen[file.Name] = true
 		switch {
 		case file.Name == "skip":
 			reason := strings.ReplaceAll(string(file.Data), "\n", " ")
@@ -2428,12 +2433,17 @@ func itemLocation(item protocol.CallHierarchyItem) protocol.Location {
 	}
 }
 
-func mcpToolMarker(mark marker, tool string, args string) {
+func mcpToolMarker(mark marker, tool string, args string, loc protocol.Location) {
 	var toolArgs map[string]any
 	if err := json.Unmarshal([]byte(args), &toolArgs); err != nil {
 		mark.errorf("fail to unmarshal arguments to map[string]any: %v", err)
 		return
 	}
+
+	// Inserts the location value into the MCP tool arguments map under the
+	// "loc" key.
+	// TODO(hxjiang): Make the "loc" key configurable.
+	toolArgs["loc"] = loc
 
 	res, err := mark.run.env.MCPSession.CallTool(mark.ctx(), tool, toolArgs, nil)
 	if err != nil {
@@ -2445,6 +2455,7 @@ func mcpToolMarker(mark marker, tool string, args string) {
 	for i, c := range res.Content {
 		if c.Type != "text" {
 			mark.errorf("unsupported return content[%v] type: %s", i, c.Type)
+			continue
 		}
 		buf.WriteString(c.Text)
 	}
