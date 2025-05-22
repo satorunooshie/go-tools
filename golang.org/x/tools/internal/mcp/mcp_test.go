@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -39,7 +40,26 @@ func TestEndToEnd(t *testing.T) {
 	ctx := context.Background()
 	ct, st := NewInMemoryTransports()
 
-	s := NewServer("testServer", "v1.0.0", nil)
+	// Channels to check if notification callbacks happened.
+	notificationChans := map[string]chan int{}
+	for _, name := range []string{"initialized", "roots", "tools", "prompts", "resources"} {
+		notificationChans[name] = make(chan int, 1)
+	}
+	waitForNotification := func(t *testing.T, name string) {
+		t.Helper()
+		select {
+		case <-notificationChans[name]:
+		case <-time.After(time.Second):
+			t.Fatalf("%s handler never called", name)
+		}
+	}
+
+	sopts := &ServerOptions{
+		InitializedHandler:      func(context.Context, *ServerSession, *InitializedParams) { notificationChans["initialized"] <- 0 },
+		RootsListChangedHandler: func(context.Context, *ServerSession, *RootsListChangedParams) { notificationChans["roots"] <- 0 },
+	}
+
+	s := NewServer("testServer", "v1.0.0", sopts)
 
 	// The 'greet' tool says hi.
 	s.AddTools(NewTool("greet", "say hi", sayHi))
@@ -53,15 +73,16 @@ func TestEndToEnd(t *testing.T) {
 	)
 
 	s.AddPrompts(
-		NewPrompt("code_review", "do a code review", func(_ context.Context, _ *ServerSession, params struct{ Code string }) (*GetPromptResult, error) {
-			return &GetPromptResult{
-				Description: "Code review prompt",
-				Messages: []*PromptMessage{
-					{Role: "user", Content: NewTextContent("Please review the following code: " + params.Code)},
-				},
-			}, nil
-		}),
-		NewPrompt("fail", "", func(_ context.Context, _ *ServerSession, params struct{}) (*GetPromptResult, error) {
+		NewPrompt("code_review", "do a code review",
+			func(_ context.Context, _ *ServerSession, params struct{ Code string }, _ *GetPromptParams) (*GetPromptResult, error) {
+				return &GetPromptResult{
+					Description: "Code review prompt",
+					Messages: []*PromptMessage{
+						{Role: "user", Content: NewTextContent("Please review the following code: " + params.Code)},
+					},
+				}, nil
+			}),
+		NewPrompt("fail", "", func(_ context.Context, _ *ServerSession, args struct{}, _ *GetPromptParams) (*GetPromptResult, error) {
 			return nil, failure
 		}),
 	)
@@ -85,9 +106,16 @@ func TestEndToEnd(t *testing.T) {
 		clientWG.Done()
 	}()
 
+	loggingMessages := make(chan *LoggingMessageParams, 100) // big enough for all logging
 	opts := &ClientOptions{
 		CreateMessageHandler: func(context.Context, *ClientSession, *CreateMessageParams) (*CreateMessageResult, error) {
 			return &CreateMessageResult{Model: "aModel"}, nil
+		},
+		ToolListChangedHandler:     func(context.Context, *ClientSession, *ToolListChangedParams) { notificationChans["tools"] <- 0 },
+		PromptListChangedHandler:   func(context.Context, *ClientSession, *PromptListChangedParams) { notificationChans["prompts"] <- 0 },
+		ResourceListChangedHandler: func(context.Context, *ClientSession, *ResourceListChangedParams) { notificationChans["resources"] <- 0 },
+		LoggingMessageHandler: func(_ context.Context, _ *ClientSession, lm *LoggingMessageParams) {
+			loggingMessages <- lm
 		},
 	}
 	c := NewClient("testClient", "v1.0.0", opts)
@@ -103,6 +131,7 @@ func TestEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	waitForNotification(t, "initialized")
 	if err := cs.Ping(ctx, nil); err != nil {
 		t.Fatalf("ping failed: %v", err)
 	}
@@ -141,6 +170,11 @@ func TestEndToEnd(t *testing.T) {
 		if _, err := cs.GetPrompt(ctx, &GetPromptParams{Name: "fail"}); err == nil || !strings.Contains(err.Error(), failure.Error()) {
 			t.Errorf("fail returned unexpected error: got %v, want containing %v", err, failure)
 		}
+
+		s.AddPrompts(&ServerPrompt{Prompt: &Prompt{Name: "T"}})
+		waitForNotification(t, "prompts")
+		s.RemovePrompts("T")
+		waitForNotification(t, "prompts")
 	})
 
 	t.Run("tools", func(t *testing.T) {
@@ -198,6 +232,11 @@ func TestEndToEnd(t *testing.T) {
 		if diff := cmp.Diff(wantFail, gotFail); diff != "" {
 			t.Errorf("tools/call 'fail' mismatch (-want +got):\n%s", diff)
 		}
+
+		s.AddTools(&ServerTool{Tool: &Tool{Name: "T"}})
+		waitForNotification(t, "tools")
+		s.RemoveTools("T")
+		waitForNotification(t, "tools")
 	})
 
 	t.Run("resources", func(t *testing.T) {
@@ -254,6 +293,11 @@ func TestEndToEnd(t *testing.T) {
 				}
 			}
 		}
+
+		s.AddResources(&ServerResource{Resource: &Resource{URI: "http://U"}})
+		waitForNotification(t, "resources")
+		s.RemoveResources("http://U")
+		waitForNotification(t, "resources")
 	})
 	t.Run("roots", func(t *testing.T) {
 		rootRes, err := ss.ListRoots(ctx, &ListRootsParams{})
@@ -265,6 +309,11 @@ func TestEndToEnd(t *testing.T) {
 		if diff := cmp.Diff(wantRoots, gotRoots); diff != "" {
 			t.Errorf("roots/list mismatch (-want +got):\n%s", diff)
 		}
+
+		c.AddRoots(&Root{URI: "U"})
+		waitForNotification(t, "roots")
+		c.RemoveRoots("U")
+		waitForNotification(t, "roots")
 	})
 	t.Run("sampling", func(t *testing.T) {
 		// TODO: test that a client that doesn't have the handler returns CodeUnsupportedMethod.
@@ -275,6 +324,85 @@ func TestEndToEnd(t *testing.T) {
 		if g, w := res.Model, "aModel"; g != w {
 			t.Errorf("got %q, want %q", g, w)
 		}
+	})
+	t.Run("logging", func(t *testing.T) {
+		want := []*LoggingMessageParams{
+			{
+				Logger: "test",
+				Level:  "warning",
+				Data: map[string]any{
+					"msg":     "first",
+					"name":    "Pat",
+					"logtest": true,
+				},
+			},
+			{
+				Logger: "test",
+				Level:  "alert",
+				Data: map[string]any{
+					"msg":     "second",
+					"count":   2.0,
+					"logtest": true,
+				},
+			},
+		}
+
+		check := func(t *testing.T) {
+			t.Helper()
+			var got []*LoggingMessageParams
+			// Read messages from this test until we've seen all we expect.
+			for len(got) < len(want) {
+				select {
+				case p := <-loggingMessages:
+					// Ignore logging from other tests.
+					if m, ok := p.Data.(map[string]any); ok && m["logtest"] != nil {
+						delete(m, "time") // remove time because it changes
+						got = append(got, p)
+					}
+				case <-time.After(time.Second):
+					t.Fatal("timed out waiting for log messages")
+				}
+			}
+			if diff := cmp.Diff(want, got); diff != "" {
+				t.Errorf("mismatch (-want, +got):\n%s", diff)
+			}
+		}
+
+		t.Run("direct", func(t *testing.T) { // Use the LoggingMessage method directly.
+
+			mustLog := func(level LoggingLevel, data any) {
+				t.Helper()
+				if err := ss.LoggingMessage(ctx, &LoggingMessageParams{
+					Logger: "test",
+					Level:  level,
+					Data:   data,
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			// Nothing should be logged until the client sets a level.
+			mustLog("info", "before")
+			if err := cs.SetLevel(ctx, &SetLevelParams{Level: "warning"}); err != nil {
+				t.Fatal(err)
+			}
+			mustLog("warning", want[0].Data)
+			mustLog("debug", "nope")    // below the level
+			mustLog("info", "negative") // below the level
+			mustLog("alert", want[1].Data)
+			check(t)
+		})
+
+		t.Run("handler", func(t *testing.T) { // Use the slog handler.
+			// We can't check the "before SetLevel" behavior because it's already been set.
+			// Not a big deal: that check is in LoggingMessage anyway.
+			logger := slog.New(NewLoggingHandler(ss, &LoggingHandlerOptions{LoggerName: "test"}))
+			logger.Warn("first", "name", "Pat", "logtest", true)
+			logger.Debug("nope")    // below the level
+			logger.Info("negative") // below the level
+			logger.Log(ctx, LevelAlert, "second", "count", 2, "logtest", true)
+			check(t)
+		})
 	})
 
 	// Disconnect.
@@ -462,6 +590,10 @@ func TestMiddleware(t *testing.T) {
 2 >initialize
 2 <initialize
 1 <initialize
+1 >notifications/initialized
+2 >notifications/initialized
+2 <notifications/initialized
+1 <notifications/initialized
 1 >tools/list
 2 >tools/list
 2 <tools/list
