@@ -30,10 +30,34 @@ func (rs *Resolved) Validate(instance any) error {
 	return st.validate(reflect.ValueOf(instance), st.rs.root, nil)
 }
 
+// validateDefaults walks the schema tree. If it finds a default, it validates it
+// against the schema containing it.
+//
+// TODO(jba): account for dynamic refs. This algorithm simple-mindedly
+// treats each schema with a default as its own root.
+func (rs *Resolved) validateDefaults() error {
+	if s := rs.root.Schema; s != "" && s != draft202012 {
+		return fmt.Errorf("cannot validate version %s, only %s", s, draft202012)
+	}
+	st := &state{rs: rs}
+	for s := range rs.root.all() {
+		// We checked for nil schemas in [Schema.Resolve].
+		assert(s != nil, "nil schema")
+		if s.DynamicRef != "" {
+			return fmt.Errorf("jsonschema: %s: validateDefaults does not support dynamic refs", s)
+		}
+		if s.Default != nil {
+			if err := st.validate(reflect.ValueOf(*s.Default), s, nil); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // state is the state of single call to ResolvedSchema.Validate.
 type state struct {
-	rs    *Resolved
-	depth int
+	rs *Resolved
 	// stack holds the schemas from recursive calls to validate.
 	// These are the "dynamic scopes" used to resolve dynamic references.
 	// https://json-schema.org/draft/2020-12/json-schema-core#scopes
@@ -48,9 +72,6 @@ func (st *state) validate(instance reflect.Value, schema *Schema, callerAnns *an
 	defer func() {
 		st.stack = st.stack[:len(st.stack)-1] // pop
 	}()
-	if depth := len(st.stack); depth >= 100 {
-		return fmt.Errorf("max recursion depth of %d reached", depth)
-	}
 
 	// We checked for nil schemas in [Schema.Resolve].
 	assert(schema != nil, "nil schema")
