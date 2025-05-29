@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//go:build go1.25
+//go:build go1.24 && goexperiment.synctest
 
 package mcp
 
@@ -55,6 +55,7 @@ type conformanceTest struct {
 	server                    []jsonrpc2.Message // server messages
 }
 
+// TODO(jba): support synthetic responses.
 // TODO(rfindley): add client conformance tests.
 
 func TestServerConformance(t *testing.T) {
@@ -86,9 +87,12 @@ func TestServerConformance(t *testing.T) {
 			// By comparison, gopls has a complicated framework based on progress
 			// reporting and careful accounting to detect when all 'expected' work
 			// on the server is complete.
-			synctest.Test(t, func(t *testing.T) {
-				runServerTest(t, test)
-			})
+			synctest.Run(func() { runServerTest(t, test) })
+
+			// TODO: in 1.25, use the following instead:
+			// synctest.Test(t, func(t *testing.T) {
+			// 	runServerTest(t, test)
+			// })
 		})
 	}
 }
@@ -186,7 +190,7 @@ func runServerTest(t *testing.T, test *conformanceTest) {
 		if !seenServer {
 			arch.Files = append(arch.Files, serverFile)
 		}
-		if err := os.WriteFile(test.path, txtar.Format(arch), 0666); err != nil {
+		if err := os.WriteFile(test.path, txtar.Format(arch), 0o666); err != nil {
 			t.Fatalf("os.WriteFile(%q) failed: %v", test.path, err)
 		}
 	} else {
@@ -240,7 +244,7 @@ func loadConformanceTest(dir, path string) (*conformanceTest, error) {
 	// loadFeatures loads lists of named features from the archive file.
 	loadFeatures := func(data []byte) []string {
 		var feats []string
-		for line := range strings.SplitSeq(string(data), "\n") {
+		for line := range strings.Lines(string(data)) {
 			if f := strings.TrimSpace(line); f != "" {
 				feats = append(feats, f)
 			}
@@ -259,7 +263,7 @@ func loadConformanceTest(dir, path string) (*conformanceTest, error) {
 			test.tools = loadFeatures(f.Data)
 		case "prompts":
 			test.prompts = loadFeatures(f.Data)
-		case "resource":
+		case "resources":
 			test.resources = loadFeatures(f.Data)
 		case "client":
 			test.client, err = decodeMessages(f.Data)
