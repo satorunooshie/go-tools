@@ -3573,7 +3573,7 @@ The proposal https://go.dev/issue/32816 introduces the "//go:fix" directives.
 
 You can use this (officially unsupported) command to apply gofix fixes en masse:
 
-	$ go run golang.org/x/tools/gopls/internal/analysis/gofix/cmd/gofix@latest -test ./...
+	$ go run golang.org/x/tools/internal/gofix/cmd/gofix@latest -test ./...
 
 (Do not use "go get -tool" to add gopls as a dependency of your
 module; gopls commands must be built from their release branch.)
@@ -3752,6 +3752,39 @@ or the new context will remain live until its parent context is cancelled.
 Default: on.
 
 Package documentation: [lostcancel](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/lostcancel)
+
+<a id='maprange'></a>
+## `maprange`: checks for unnecessary calls to maps.Keys and maps.Values in range statements
+
+
+Consider a loop written like this:
+
+	for val := range maps.Values(m) {
+		fmt.Println(val)
+	}
+
+This should instead be written without the call to maps.Values:
+
+	for _, val := range m {
+		fmt.Println(val)
+	}
+
+golang.org/x/exp/maps returns slices for Keys/Values instead of iterators,
+but unnecessary calls should similarly be removed:
+
+	for _, key := range maps.Keys(m) {
+		fmt.Println(key)
+	}
+
+should be rewritten as:
+
+	for key := range m {
+		fmt.Println(key)
+	}
+
+Default: on.
+
+Package documentation: [maprange](https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/maprange)
 
 <a id='modernize'></a>
 ## `modernize`: simplify code by using modern constructs
