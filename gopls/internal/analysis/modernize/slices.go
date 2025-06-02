@@ -4,9 +4,6 @@
 
 package modernize
 
-// This file defines modernizers that use the "slices" package.
-// TODO(adonovan): actually let's split them up and rename this file.
-
 import (
 	"fmt"
 	"go/ast"
@@ -20,6 +17,17 @@ import (
 	"golang.org/x/tools/go/types/typeutil"
 	"golang.org/x/tools/internal/analysisinternal"
 )
+
+// append(clipped, ...) cannot be replaced by slices.Concat (etc)
+// without more attention to preservation of nilness; see #73557.
+// Until we either fix it or revise our safety goals, we disable this
+// analyzer for now.
+//
+// Its former documentation in doc.go was:
+//
+//   - appendclipped: replace append([]T(nil), s...) by
+//     slices.Clone(s) or slices.Concat(s), added in go1.21.
+var EnableAppendClipped = false
 
 // The appendclipped pass offers to simplify a tower of append calls:
 //
@@ -44,8 +52,12 @@ import (
 //	append([]string(nil), os.Environ()...)            -> os.Environ()
 //
 // The fix does not always preserve nilness the of base slice when the
-// addends (a, b, c) are all empty.
+// addends (a, b, c) are all empty (see #73557).
 func appendclipped(pass *analysis.Pass) {
+	if !EnableAppendClipped {
+		return
+	}
+
 	// Skip the analyzer in packages where its
 	// fixes would create an import cycle.
 	if within(pass, "slices", "bytes", "runtime") {
@@ -64,9 +76,38 @@ func appendclipped(pass *analysis.Pass) {
 			return
 		}
 
+		// If any slice arg has a different type from the base
+		// (and thus the result) don't offer a fix, to avoid
+		// changing the return type, e.g:
+		//
+		//     type S []int
+		//   - x := append([]int(nil), S{}...) // x : []int
+		//   + x := slices.Clone(S{})          // x : S
+		//
+		// We could do better by inserting an explicit generic
+		// instantiation:
+		//
+		//   x := slices.Clone[[]int](S{})
+		//
+		// but this is often unnecessary and unwanted, such as
+		// when the value is used an in assignment context that
+		// provides an explicit type:
+		//
+		//   var x []int = slices.Clone(S{})
+		baseType := info.TypeOf(base)
+		for _, arg := range sliceArgs {
+			if !types.Identical(info.TypeOf(arg), baseType) {
+				return
+			}
+		}
+
 		// If the (clipped) base is empty, it may be safely ignored.
 		// Otherwise treat it (or its unclipped subexpression, if possible)
 		// as just another arg (the first) to Concat.
+		//
+		// TODO(adonovan): not so fast! If all the operands
+		// are empty, then the nilness of base matters, because
+		// append preserves nilness whereas Concat does not (#73557).
 		if !empty {
 			sliceArgs = append(sliceArgs, clipped)
 		}
@@ -86,7 +127,7 @@ func appendclipped(pass *analysis.Pass) {
 					pass.Report(analysis.Diagnostic{
 						Pos:      call.Pos(),
 						End:      call.End(),
-						Category: "slicesclone",
+						Category: "appendclipped",
 						Message:  "Redundant clone of os.Environ()",
 						SuggestedFixes: []analysis.SuggestedFix{{
 							Message: "Eliminate redundant clone",
@@ -118,12 +159,15 @@ func appendclipped(pass *analysis.Pass) {
 				"slices")
 
 			// append(zerocap, s...) -> slices.Clone(s) or bytes.Clone(s)
+			//
+			// This is unsound if s is empty and its nilness
+			// differs from zerocap (#73557).
 			_, prefix, importEdits := analysisinternal.AddImport(info, file, clonepkg, clonepkg, "Clone", call.Pos())
 			message := fmt.Sprintf("Replace append with %s.Clone", clonepkg)
 			pass.Report(analysis.Diagnostic{
 				Pos:      call.Pos(),
 				End:      call.End(),
-				Category: "slicesclone",
+				Category: "appendclipped",
 				Message:  message,
 				SuggestedFixes: []analysis.SuggestedFix{{
 					Message: message,
@@ -138,11 +182,13 @@ func appendclipped(pass *analysis.Pass) {
 		}
 
 		// append(append(append(base, a...), b..., c...) -> slices.Concat(base, a, b, c)
+		//
+		// This is unsound if all slices are empty and base is non-nil (#73557).
 		_, prefix, importEdits := analysisinternal.AddImport(info, file, "slices", "slices", "Concat", call.Pos())
 		pass.Report(analysis.Diagnostic{
 			Pos:      call.Pos(),
 			End:      call.End(),
-			Category: "slicesclone",
+			Category: "appendclipped",
 			Message:  "Replace append with slices.Concat",
 			SuggestedFixes: []analysis.SuggestedFix{{
 				Message: "Replace append with slices.Concat",
@@ -200,7 +246,7 @@ func appendclipped(pass *analysis.Pass) {
 // The value of res is either the same as e or is a subexpression of e
 // that denotes the same slice but without the clipping operation.
 //
-// In addition, it reports whether the slice is definitely empty,
+// In addition, it reports whether the slice is definitely empty.
 //
 // Examples of clipped slices:
 //

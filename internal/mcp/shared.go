@@ -16,6 +16,7 @@ import (
 	"log"
 	"reflect"
 	"slices"
+	"strings"
 	"time"
 
 	jsonrpc2 "golang.org/x/tools/internal/jsonrpc2_v2"
@@ -24,48 +25,83 @@ import (
 // A MethodHandler handles MCP messages.
 // For methods, exactly one of the return values must be nil.
 // For notifications, both must be nil.
-type MethodHandler[S ClientSession | ServerSession] func(
-	ctx context.Context, _ *S, method string, params Params) (result Result, err error)
+type MethodHandler[S Session] func(
+	ctx context.Context, _ S, method string, params Params) (result Result, err error)
+
+// A methodHandler is a MethodHandler[Session] for some session.
+// We need to give up type safety here, or we will end up with a type cycle somewhere
+// else. For example, if Session.methodHandler returned a MethodHandler[Session],
+// the compiler would complain.
+type methodHandler any // MethodHandler[*ClientSession] | MethodHandler[*ServerSession]
+
+// A Session is either a ClientSession or a ServerSession.
+type Session interface {
+	*ClientSession | *ServerSession
+	sendingMethodInfos() map[string]methodInfo
+	receivingMethodInfos() map[string]methodInfo
+	sendingMethodHandler() methodHandler
+	receivingMethodHandler() methodHandler
+	getConn() *jsonrpc2.Connection
+}
 
 // Middleware is a function from MethodHandlers to MethodHandlers.
-type Middleware[S ClientSession | ServerSession] func(MethodHandler[S]) MethodHandler[S]
+type Middleware[S Session] func(MethodHandler[S]) MethodHandler[S]
 
 // addMiddleware wraps the handler in the middleware functions.
-func addMiddleware[S ClientSession | ServerSession](handlerp *MethodHandler[S], middleware []Middleware[S]) {
+func addMiddleware[S Session](handlerp *MethodHandler[S], middleware []Middleware[S]) {
 	for _, m := range slices.Backward(middleware) {
 		*handlerp = m(*handlerp)
 	}
 }
 
-// session has methods common to both ClientSession and ServerSession.
-type session[S ClientSession | ServerSession] interface {
-	methodHandler() MethodHandler[S]
-	methodInfos() map[string]methodInfo[S]
-	getConn() *jsonrpc2.Connection
-}
-
-// toSession[S] converts its argument to a session[S].
-// Note that since S is constrained to ClientSession | ServerSession, and pointers to those
-// types both implement session[S] already, this should be a no-op.
-// That it is not, is due (I believe) to a deficency in generics, possibly related to core types.
-// TODO(jba): revisit in Go 1.26; perhaps the change in spec due to the removal of core types
-// will have resulted by then in a more generous implementation.
-func toSession[S ClientSession | ServerSession](sess *S) session[S] {
-	return any(sess).(session[S])
-}
-
-// defaultMethodHandler is the initial MethodHandler for servers and clients, before being wrapped by middleware.
-func defaultMethodHandler[S ClientSession | ServerSession](ctx context.Context, sess *S, method string, params Params) (Result, error) {
-	info, ok := toSession(sess).methodInfos()[method]
+func defaultSendingMethodHandler[S Session](ctx context.Context, session S, method string, params Params) (Result, error) {
+	info, ok := session.sendingMethodInfos()[method]
 	if !ok {
 		// This can be called from user code, with an arbitrary value for method.
 		return nil, jsonrpc2.ErrNotHandled
 	}
-	return info.handleMethod(ctx, sess, method, params)
+	// Notifications don't have results.
+	if strings.HasPrefix(method, "notifications/") {
+		return nil, session.getConn().Notify(ctx, method, params)
+	}
+	// Create the result to unmarshal into.
+	// The concrete type of the result is the return type of the receiving function.
+	res := info.newResult()
+	if err := call(ctx, session.getConn(), method, params, res); err != nil {
+		return nil, err
+	}
+	return res, nil
 }
 
-func handleRequest[S ClientSession | ServerSession](ctx context.Context, req *jsonrpc2.Request, sess *S) (any, error) {
-	info, ok := toSession(sess).methodInfos()[req.Method]
+func handleNotify[S Session](ctx context.Context, session S, method string, params Params) error {
+	mh := session.sendingMethodHandler().(MethodHandler[S])
+	_, err := mh(ctx, session, method, params)
+	return err
+}
+
+func handleSend[R Result, S Session](ctx context.Context, s S, method string, params Params) (R, error) {
+	mh := s.sendingMethodHandler().(MethodHandler[S])
+	// mh might be user code, so ensure that it returns the right values for the jsonrpc2 protocol.
+	res, err := mh(ctx, s, method, params)
+	if err != nil {
+		var z R
+		return z, err
+	}
+	return res.(R), nil
+}
+
+// defaultReceivingMethodHandler is the initial MethodHandler for servers and clients, before being wrapped by middleware.
+func defaultReceivingMethodHandler[S Session](ctx context.Context, session S, method string, params Params) (Result, error) {
+	info, ok := session.receivingMethodInfos()[method]
+	if !ok {
+		// This can be called from user code, with an arbitrary value for method.
+		return nil, jsonrpc2.ErrNotHandled
+	}
+	return info.handleMethod.(MethodHandler[S])(ctx, session, method, params)
+}
+
+func handleReceive[S Session](ctx context.Context, session S, req *jsonrpc2.Request) (Result, error) {
+	info, ok := session.receivingMethodInfos()[req.Method]
 	if !ok {
 		return nil, jsonrpc2.ErrNotHandled
 	}
@@ -74,21 +110,26 @@ func handleRequest[S ClientSession | ServerSession](ctx context.Context, req *js
 		return nil, fmt.Errorf("handleRequest %q: %w", req.Method, err)
 	}
 
+	mh := session.receivingMethodHandler().(MethodHandler[S])
 	// mh might be user code, so ensure that it returns the right values for the jsonrpc2 protocol.
-	mh := toSession(sess).methodHandler()
-	res, err := mh(ctx, sess, req.Method, params)
+	res, err := mh(ctx, session, req.Method, params)
 	if err != nil {
 		return nil, err
 	}
 	return res, nil
 }
 
-// methodInfo is information about invoking a method.
-type methodInfo[TSession ClientSession | ServerSession] struct {
-	// unmarshal params from the wire into an XXXParams struct
+// methodInfo is information about sending and receiving a method.
+type methodInfo struct {
+	// Unmarshal params from the wire into a Params struct.
+	// Used on the receive side.
 	unmarshalParams func(json.RawMessage) (Params, error)
-	// run the code for the method
-	handleMethod MethodHandler[TSession]
+	// Run the code when a call to the method is received.
+	// Used on the receive side.
+	handleMethod methodHandler
+	// Create a pointer to a Result struct.
+	// Used on the send side.
+	newResult func() Result
 }
 
 // The following definitions support converting from typed to untyped method handlers.
@@ -98,11 +139,11 @@ type methodInfo[TSession ClientSession | ServerSession] struct {
 // - R: results
 
 // A typedMethodHandler is like a MethodHandler, but with type information.
-type typedMethodHandler[S any, P Params, R Result] func(context.Context, *S, P) (R, error)
+type typedMethodHandler[S Session, P Params, R Result] func(context.Context, S, P) (R, error)
 
 // newMethodInfo creates a methodInfo from a typedMethodHandler.
-func newMethodInfo[S ClientSession | ServerSession, P Params, R Result](d typedMethodHandler[S, P, R]) methodInfo[S] {
-	return methodInfo[S]{
+func newMethodInfo[S Session, P Params, R Result](d typedMethodHandler[S, P, R]) methodInfo {
+	return methodInfo{
 		unmarshalParams: func(m json.RawMessage) (Params, error) {
 			var p P
 			if m != nil {
@@ -112,29 +153,38 @@ func newMethodInfo[S ClientSession | ServerSession, P Params, R Result](d typedM
 			}
 			return p, nil
 		},
-		handleMethod: func(ctx context.Context, ss *S, _ string, params Params) (Result, error) {
-			return d(ctx, ss, params.(P))
-		},
+		handleMethod: MethodHandler[S](func(ctx context.Context, session S, _ string, params Params) (Result, error) {
+			return d(ctx, session, params.(P))
+		}),
+		// newResult is used on the send side, to construct the value to unmarshal the result into.
+		// R is a pointer to a result struct. There is no way to "unpointer" it without reflection.
+		// TODO(jba): explore generic approaches to this, perhaps by treating R in
+		// the signature as the unpointered type.
+		newResult: func() Result { return reflect.New(reflect.TypeFor[R]().Elem()).Interface().(R) },
 	}
 }
 
 // serverMethod is glue for creating a typedMethodHandler from a method on Server.
-func serverMethod[P Params, R Result](f func(*Server, context.Context, *ServerSession, P) (R, error)) typedMethodHandler[ServerSession, P, R] {
+func serverMethod[P Params, R Result](
+	f func(*Server, context.Context, *ServerSession, P) (R, error),
+) typedMethodHandler[*ServerSession, P, R] {
 	return func(ctx context.Context, ss *ServerSession, p P) (R, error) {
 		return f(ss.server, ctx, ss, p)
 	}
 }
 
 // clientMethod is glue for creating a typedMethodHandler from a method on Server.
-func clientMethod[P Params, R Result](f func(*Client, context.Context, *ClientSession, P) (R, error)) typedMethodHandler[ClientSession, P, R] {
+func clientMethod[P Params, R Result](
+	f func(*Client, context.Context, *ClientSession, P) (R, error),
+) typedMethodHandler[*ClientSession, P, R] {
 	return func(ctx context.Context, cs *ClientSession, p P) (R, error) {
 		return f(cs.client, ctx, cs, p)
 	}
 }
 
 // sessionMethod is glue for creating a typedMethodHandler from a method on ServerSession.
-func sessionMethod[S ClientSession | ServerSession, P Params, R Result](f func(*S, context.Context, P) (R, error)) typedMethodHandler[S, P, R] {
-	return func(ctx context.Context, sess *S, p P) (R, error) {
+func sessionMethod[S Session, P Params, R Result](f func(S, context.Context, P) (R, error)) typedMethodHandler[S, P, R] {
+	return func(ctx context.Context, sess S, p P) (R, error) {
 		return f(sess, ctx, p)
 	}
 }
@@ -152,7 +202,7 @@ const (
 	CodeUnsupportedMethod = -31001
 )
 
-func callNotificationHandler[S ClientSession | ServerSession, P any](ctx context.Context, h func(context.Context, *S, *P), sess *S, params *P) (Result, error) {
+func callNotificationHandler[S Session, P any](ctx context.Context, h func(context.Context, S, *P), sess S, params *P) (Result, error) {
 	if h != nil {
 		h(ctx, sess, params)
 	}
@@ -161,27 +211,19 @@ func callNotificationHandler[S ClientSession | ServerSession, P any](ctx context
 
 // notifySessions calls Notify on all the sessions.
 // Should be called on a copy of the peer sessions.
-func notifySessions[S ClientSession | ServerSession](sessions []*S, method string, params Params) {
+func notifySessions[S Session](sessions []S, method string, params Params) {
 	if sessions == nil {
 		return
 	}
 	// TODO: make this timeout configurable, or call Notify asynchronously.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	for _, ss := range sessions {
-		if err := toSession(ss).getConn().Notify(ctx, method, params); err != nil {
+	for _, s := range sessions {
+		if err := handleNotify(ctx, s, method, params); err != nil {
 			// TODO(jba): surface this error better
 			log.Printf("calling %s: %v", method, err)
 		}
 	}
-}
-
-func standardCall[TRes, TParams any](ctx context.Context, conn *jsonrpc2.Connection, method string, params TParams) (*TRes, error) {
-	var result TRes
-	if err := call(ctx, conn, method, params, &result); err != nil {
-		return nil, err
-	}
-	return &result, nil
 }
 
 type Meta struct {
@@ -228,4 +270,4 @@ type Result interface {
 // Those methods cannot return nil, because jsonrpc2 cannot handle nils.
 type emptyResult struct{}
 
-func (emptyResult) GetMeta() *Meta { panic("should never be called") }
+func (*emptyResult) GetMeta() *Meta { panic("should never be called") }

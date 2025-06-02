@@ -20,7 +20,7 @@ These may be obvious, but it's worthwhile to define goals for an official MCP SD
 - **future-proof**: the SDK should allow for future evolution of the MCP spec, in such a way that we can (as much as possible) avoid incompatible changes to the SDK API.
 - **extensible**: to best serve the previous four concerns, the SDK should be minimal. However, it should admit extensibility using (for example) simple interfaces, middleware, or hooks.
 
-# Design considerations
+# Design
 
 In the sections below, we visit each aspect of the MCP spec, in approximately the order they are presented by the [official spec](https://modelcontextprotocol.io/specification/2025-03-26) For each, we discuss considerations for the Go implementation, and propose a Go API.
 
@@ -276,6 +276,7 @@ type Content struct {
 func NewTextContent(text string) *Content
 // etc.
 ```
+
 The `Meta` type includes a `map[string]any` for arbitrary data, and a `ProgressToken` field.
 
 **Differences from mcp-go**: these types are largely similar, but our type generator flattens types rather than using struct embedding.
@@ -379,9 +380,9 @@ In our SDK, RPC methods that are defined in the specification take a context and
 func (*ClientSession) ListTools(context.Context, *ListToolsParams) (*ListToolsResult, error)
 ```
 
-Our SDK has a method for every RPC in the spec, and except for `CallTool`, their signatures all share this form. We do this, rather than providing more convenient shortcut signatures, to maintain backward compatibility if the spec makes backward-compatible changes such as adding a new property to the request parameters (as in [this commit](https://github.com/modelcontextprotocol/modelcontextprotocol/commit/2fce8a077688bf8011e80af06348b8fe1dae08ac), for example). To avoid boilerplate, we don't repeat this signature for RPCs defined in the spec; readers may assume it when we mention a "spec method."
+Our SDK has a method for every RPC in the spec, their signatures all share this form. We do this, rather than providing more convenient shortcut signatures, to maintain backward compatibility if the spec makes backward-compatible changes such as adding a new property to the request parameters (as in [this commit](https://github.com/modelcontextprotocol/modelcontextprotocol/commit/2fce8a077688bf8011e80af06348b8fe1dae08ac), for example). To avoid boilerplate, we don't repeat this signature for RPCs defined in the spec; readers may assume it when we mention a "spec method."
 
-`CallTool` is the only exception: for convenience, it takes the tool name and arguments, with an options struct for additional request fields. See the section on Tools below for details.
+`CallTool` is the only exception: for convenience when binding to Go argument types, `*CallToolParams[TArgs]` is generic, with a type parameter providing the Go type of the tool arguments. The spec method accepts a `*CallToolParams[json.RawMessage]`, but we provide a generic helper function. See the section on Tools below for details.
 
 Why do we use params instead of the full JSON-RPC request? As much as possible, we endeavor to hide JSON-RPC details when they are not relevant to the business logic of your client or server. In this case, the additional information in the JSON-RPC request is just the request ID and method name; the request ID is irrelevant, and the method name is implied by the name of the Go method providing the API.
 
@@ -407,7 +408,7 @@ func (*ClientSession) ResourceTemplates(context.Context, *ListResourceTemplatesP
 
 ### Middleware
 
-We provide a mechanism to add MCP-level middleware on the both the client and server side, which runs after the request has been parsed but before any normal handling.
+We provide a mechanism to add MCP-level middleware on the both the client and server side. Receiving middleware runs after the request has been parsed but before any normal handling. It is analogous to traditional HTTP server middleware. Sending middleware runs after a call to a method but before the request is sent. It is an alternative to transport middleware that exposes MCP types instead of raw JSON-RPC 2.0 messages. It is useful for tracing and setting progress tokens, for example.
 
 ```go
 // A MethodHandler handles MCP messages.
@@ -415,11 +416,11 @@ We provide a mechanism to add MCP-level middleware on the both the client and se
 // For methods, a MethodHandler must return either an XXResult struct pointer and a nil error, or
 // nil with a non-nil error.
 // For notifications, a MethodHandler must return nil, nil.
-type MethodHandler[S ClientSession | ServerSession] func(
-	ctx context.Context, _ *S, method string, params any) (result any, err error)
+type MethodHandler[S Session] func(
+	ctx context.Context, _ *S, method string, params Params) (result Result, err error)
 
 // Middleware is a function from MethodHandlers to MethodHandlers.
-type Middleware[S ClientSession | ServerSession] func(MethodHandler[S]) MethodHandler[S]
+type Middleware[S Session] func(MethodHandler[S]) MethodHandler[S]
 
 // AddMiddleware wraps the client/server's current method handler using the provided
 // middleware. Middleware is applied from right to left, so that the first one
@@ -427,14 +428,16 @@ type Middleware[S ClientSession | ServerSession] func(MethodHandler[S]) MethodHa
 //
 // For example, AddMiddleware(m1, m2, m3) augments the server method handler as
 // m1(m2(m3(handler))).
-func (c *Client) AddMiddleware(middleware ...Middleware[ClientSession])
-func (s *Server) AddMiddleware(middleware ...Middleware[ServerSession])
+func (c *Client) AddSendingMiddleware(middleware ...Middleware[*ClientSession])
+func (c *Client) AddReceivingMiddleware(middleware ...Middleware[*ClientSession])
+func (s *Server) AddSendingMiddleware(middleware ...Middleware[*ServerSession])
+func (s *Server) AddReceivingMiddleware(middleware ...Middleware[*ServerSession])
 ```
 
 As an example, this code adds server-side logging:
 
 ```go
-func withLogging(h mcp.MethodHandler[ServerSession]) mcp.MethodHandler[ServerSession]{
+func withLogging(h mcp.MethodHandler[*ServerSession]) mcp.MethodHandler[*ServerSession]{
     return func(ctx context.Context, s *mcp.ServerSession, method string, params any) (res any, err error) {
         log.Printf("request: %s %v", method, params)
         defer func() { log.Printf("response: %v, %v", res, err) }()
@@ -442,7 +445,7 @@ func withLogging(h mcp.MethodHandler[ServerSession]) mcp.MethodHandler[ServerSes
     }
 }
 
-server.AddMiddleware(withLogging)
+server.AddReceivingMiddleware(withLogging)
 ```
 
 **Differences from mcp-go**: Version 0.26.0 of mcp-go defines 24 server hooks. Each hook consists of a field in the `Hooks` struct, a `Hooks.Add` method, and a type for the hook function. These are rarely used. The most common is `OnError`, which occurs fewer than ten times in open-source code.
@@ -494,7 +497,6 @@ type Meta struct {
   ProgressToken any // string or int
 }
 ```
-
 
 Handlers can notify their peer about progress by calling the `NotifyProgress` method. The notification is only sent if the peer requested it by providing a progress token.
 
@@ -579,7 +581,15 @@ type ClientOptions struct {
 
 A `Tool` is a logical MCP tool, generated from the MCP spec, and a `ServerTool` is a tool bound to a tool handler.
 
+A tool handler accepts `CallToolParams` and returns a `CallToolResult`. However, since we want to bind tools to Go input types, it is convenient in associated APIs to make `CallToolParams` generic, with a type parameter `TArgs` for the tool argument type. This allows tool APIs to manage the marshalling and unmarshalling of tool inputs for their caller. The bound `ServerTool` type expects a `json.RawMessage` for its tool arguments, but the `NewTool` constructor described below provides a mechanism to bind a typed handler.
+
 ```go
+type CallToolParams[TArgs any] struct {
+	Meta      Meta   `json:"_meta,omitempty"`
+	Arguments TArgs  `json:"arguments,omitempty"`
+	Name      string `json:"name"`
+}
+
 type Tool struct {
 	Annotations *ToolAnnotations   `json:"annotations,omitempty"`
 	Description string             `json:"description,omitempty"`
@@ -587,11 +597,11 @@ type Tool struct {
 	Name string                    `json:"name"`
 }
 
-type ToolHandler func(context.Context, *ServerSession, *CallToolParams) (*CallToolResult, error)
+type ToolHandler[TArgs] func(context.Context, *ServerSession, *CallToolParams[TArgs]) (*CallToolResult, error)
 
 type ServerTool struct {
 	Tool    Tool
-	Handler ToolHandler
+	Handler ToolHandler[json.RawMessage]
 }
 ```
 
@@ -620,12 +630,12 @@ We have found that a hybrid model works well, where the _initial_ schema is deri
 
 ```go
 // NewTool creates a Tool using reflection on the given handler.
-func NewTool[TInput any](name, description string, handler func(context.Context, *ServerSession, TInput) ([]Content, error), opts …ToolOption) *ServerTool
+func NewTool[TArgs any](name, description string, handler ToolHandler[TArgs], opts …ToolOption) *ServerTool
 
 type ToolOption interface { /* ... */ }
 ```
 
-`NewTool` determines the input schema for a Tool from the struct used in the handler. Each struct field that would be marshaled by `encoding/json.Marshal` becomes a property of the schema. The property is required unless the field's `json` tag specifies "omitempty" or "omitzero" (new in Go 1.24). For example, given this struct:
+`NewTool` determines the input schema for a Tool from the `TArgs` type. Each struct field that would be marshaled by `encoding/json.Marshal` becomes a property of the schema. The property is required unless the field's `json` tag specifies "omitempty" or "omitzero" (new in Go 1.24). For example, given this struct:
 
 ```go
 struct {
@@ -666,16 +676,12 @@ Schemas are validated on the server before the tool handler is called.
 
 Since all the fields of the Tool struct are exported, a Tool can also be created directly with assignment or a struct literal.
 
-Client sessions can call the spec method `ListTools` or an iterator method `Tools` to list the available tools.
-
-As mentioned above, the client session method `CallTool` has a non-standard signature, so that `CallTool` can handle the marshalling of tool arguments: the type of `CallToolParams.Arguments` is `json.RawMessage`, to delegate unmarshalling to the tool handler.
+Client sessions can call the spec method `ListTools` or an iterator method `Tools` to list the available tools, and use spec method `CallTool` to call tools. Similar to `ServerTool.Handler`, `CallTool` expects `*CallToolParams[json.RawMessage]`, but we provide a generic `CallTool` helper to operate on typed arguments.
 
 ```go
-func (c *ClientSession) CallTool(ctx context.Context, name string, args map[string]any, opts *CallToolOptions) (_ *CallToolResult, err error)
+func (cs *ClientSession) CallTool(context.Context, *CallToolParams[json.RawMessage]) (*CallToolResult, error)
 
-type CallToolOptions struct {
-	ProgressToken any // string or int
-}
+func CallTool[TArgs any](context.Context, *ClientSession, *CallToolParams[TArgs]) (*CallToolResult, error)
 ```
 
 **Differences from mcp-go**: using variadic options to configure tools was significantly inspired by mcp-go. However, the distinction between `ToolOption` and `SchemaOption` allows for recursive application of schema options. For example, that limitation is visible in [this code](https://github.com/DCjanus/dida365-mcp-server/blob/master/cmd/mcp/tools.go#L315), which must resort to untyped maps to express a nested schema.
@@ -833,6 +839,7 @@ Clients call the spec method `Complete` to request completions. Servers automati
 MCP specifies a notification for servers to log to clients. Server sessions implement this with the `LoggingMessage` method. It honors the minimum log level established by the client session's `SetLevel` call.
 
 As a convenience, we also provide a `slog.Handler` that allows server authors to write logs with the `log/slog` package::
+
 ```go
 // A LoggingHandler is a [slog.Handler] for MCP.
 type LoggingHandler struct {...}
@@ -899,3 +906,63 @@ Client requests for List methods include an optional Cursor field for pagination
 In addition to the `List` methods, the SDK provides an iterator method for each list operation. This simplifies pagination for clients by automatically handling the underlying pagination logic. See [Iterator Methods](#iterator-methods) above.
 
 **Differences with mcp-go**: the PageSize configuration is set with a configuration field rather than a variadic option. Additionally, this design proposes pagination by default, as this is likely desirable for most servers
+
+# Governance and Community
+
+While the sections above propose an initial implementation of the Go SDK, MCP is evolving rapidly. SDKs need to keep pace, by implementing changes to the spec, fixing bugs, and accomodating new and emerging use-cases. This section proposes how the SDK project can be managed so that it can change safely and transparently.
+
+Initially, the Go SDK repository will be administered by the Go team and Anthropic, and they will be the Approvers (the set of people able to merge PRs to the SDK). The policies here are also intended to satisfy necessary constraints of the Go team's participation in the project.
+
+The content in this section will also be included in a CONTRIBUTING.md file in the repo root.
+
+## Hosting, copyright, and license
+
+The SDK will be hosted under github.com/modelcontextprotocol/go-sdk, MIT license, copyright "Go SDK Authors". Each Go file in the repository will have a standard copyright header. For example:
+
+```go
+// Copyright 2025 The Go MCP SDK Authors. All rights reserved.
+// Use of this source code is governed by an MIT-style
+// license that can be found in the LICENSE file.
+```
+
+## Issues and Contributing
+
+The SDK will use its GitHub issue tracker for bug tracking, and pull requests for contributions.
+
+Contributions to the SDK will be welcomed, and will be accepted provided they are high quality and consistent with the direction and philosophy of the SDK outlined above. An official SDK must be conservative in the changes it accepts, to defend against compatibility problems, security vulnerabilities, and churn. To avoid being declined, PRs should be associated with open issues, and those issues should either be labeled 'Help Wanted', or the PR author should ask on the issue before contributing.
+
+### Proposals
+
+A proposal is an issue that proposes a new API for the SDK, or a change to the signature or behavior of an existing API. Proposals will be labeled with the 'Proposal' label, and require an explicit approval before being accepted (applied through the 'Proposal-Accepted' label). Proposals will remain open for at least a week to allow discussion before being accepted or declined by an Approver.
+
+Proposals that are straightforward and uncontroversial may be approved based on GitHub discussion. However, proposals that are deemed to be sufficiently unclear or complicated will be deferred to a regular steering meeting (see below).
+
+This process is similar to the [Go proposal process](https://github.com/golang/proposal), but is necessarily lighter weight to accomodate the greater rate of change expected for the SDK.
+
+### Steering meetings
+
+On a regular basis, we will host a virtual steering meeting to discuss outstanding proposals and other changes to the SDK. These 1hr meetings and their agenda will be announced in advance, and open to all to join. The meetings will be recorded, and recordings and meeting notes will be made available afterward.
+
+This process is similar to the [Go Tools call](https://go.dev/wiki/golang-tools), though it is expected that meetings will at least initially occur on a more frequent basis (likely biweekly).
+
+### Discord
+
+Discord (either the public or private Anthropic discord servers) should only be used for logistical coordination or answering questions. Design discussion and decisions should occur in GitHub issues or public steering meetings.
+
+### Antitrust considerations
+
+It is important that the SDK avoids bias toward specific integration paths or providers. Therefore, the CONTRIBUTING.md file will include an antitrust policy that outlines terms and practices intended to avoid such bias, or the appearance thereof. (The details of this policy will be determined by Google and Anthropic lawyers).
+
+## Releases and Versioning
+
+The SDK will consist of a single Go module, and will be released through versioned Git tags. Accordingly, it will follow semantic versioning.
+
+Up until the v1.0.0 release, the SDK may be unstable and may change in breaking ways. An initial v1.0.0 release will occur when the SDK is deemed by Approvers to be stable, production ready, and sufficiently complete (though some unimplemented features may remain). Subsequent to that release, new APIs will be added in minor versions, and breaking changes will require a v2 release of the module (and therefore should be avoided). All releases will have corresponding release notes in GitHub.
+
+It is desirable that releases occur frequently, and that a v1.0.0 release is achieved as quickly as possible.
+
+If feasible, the SDK will support all versions of the MCP spec. However, if breaking changes to the spec make this infeasible, preference will be given to the most recent version of the MCP spec.
+
+## Ongoing evaluation
+
+On an ongoing basis, the administrators of the SDK will evaluate whether it is keeping pace with changes to the MCP spec and meeting its goals of openness and transparency. If it is not meeting these goals, either because it exceeds the bandwidth of its current Approvers, or because the processes here are inadequate, these processes will be re-evaluated. At this time, the Approvers set may be expanded to include additional community members, based on their history of strong contribution.
