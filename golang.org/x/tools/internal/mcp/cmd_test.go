@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"golang.org/x/tools/internal/mcp"
+	"golang.org/x/tools/internal/testenv"
 )
 
 const runAsServer = "_MCP_RUN_AS_SERVER"
@@ -38,6 +39,8 @@ func runServer() {
 }
 
 func TestCmdTransport(t *testing.T) {
+	testenv.NeedsExec(t)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -53,7 +56,10 @@ func TestCmdTransport(t *testing.T) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	got, err := session.CallTool(ctx, "greet", map[string]any{"name": "user"}, nil)
+	got, err := mcp.CallTool(ctx, session, &mcp.CallToolParams[map[string]any]{
+		Name:      "greet",
+		Arguments: map[string]any{"name": "user"},
+	})
 	if err != nil {
 		log.Fatal(err)
 	}

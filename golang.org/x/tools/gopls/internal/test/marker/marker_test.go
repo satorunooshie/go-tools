@@ -1988,8 +1988,12 @@ func signatureMarker(mark marker, src protocol.Location, label string, active in
 	if got := gotLabels[0]; got != label {
 		mark.errorf("signatureHelp: got label %q, want %q", got, label)
 	}
-	if got := int64(got.ActiveParameter); got != active {
-		mark.errorf("signatureHelp: got active parameter %d, want %d", got, active)
+	gotActiveParameter := int64(-1) // => missing
+	if got.ActiveParameter != nil {
+		gotActiveParameter = int64(*got.ActiveParameter)
+	}
+	if gotActiveParameter != active {
+		mark.errorf("signatureHelp: got active parameter %d, want %d", gotActiveParameter, active)
 	}
 }
 
@@ -2438,19 +2442,20 @@ func implementationMarker(mark marker, src protocol.Location, want ...protocol.L
 	}
 }
 
-func mcpToolMarker(mark marker, tool string, args string, loc protocol.Location) {
-	var toolArgs map[string]any
-	if err := json.Unmarshal([]byte(args), &toolArgs); err != nil {
+func mcpToolMarker(mark marker, tool string, rawArgs string, loc protocol.Location) {
+	args := make(map[string]any)
+	if err := json.Unmarshal([]byte(rawArgs), &args); err != nil {
 		mark.errorf("fail to unmarshal arguments to map[string]any: %v", err)
 		return
 	}
 
-	// Inserts the location value into the MCP tool arguments map under the
-	// "loc" key.
-	// TODO(hxjiang): Make the "loc" key configurable.
-	toolArgs["loc"] = loc
+	// TODO(hxjiang): Make the "location" key configurable.
+	args["location"] = loc
 
-	res, err := mark.run.env.MCPSession.CallTool(mark.ctx(), tool, toolArgs, nil)
+	res, err := mcp.CallTool(mark.ctx(), mark.run.env.MCPSession, &mcp.CallToolParams[map[string]any]{
+		Name:      tool,
+		Arguments: args,
+	})
 	if err != nil {
 		mark.errorf("failed to call mcp tool: %v", err)
 		return

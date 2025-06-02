@@ -18,7 +18,7 @@ func (s *server) SignatureHelp(ctx context.Context, params *protocol.SignatureHe
 	ctx, done := event.Start(ctx, "server.SignatureHelp", label.URI.Of(params.TextDocument.URI))
 	defer done()
 
-	fh, snapshot, release, err := s.fileOf(ctx, params.TextDocument.URI)
+	fh, snapshot, release, err := s.session.FileOf(ctx, params.TextDocument.URI)
 	if err != nil {
 		return nil, err
 	}
@@ -43,6 +43,9 @@ func (s *server) SignatureHelp(ctx context.Context, params *protocol.SignatureHe
 	}
 	return &protocol.SignatureHelp{
 		Signatures:      []protocol.SignatureInformation{*info},
-		ActiveParameter: uint32(activeParameter),
+		ActiveParameter: varOf(uint32(activeParameter)),
 	}, nil
 }
+
+// varOf returns a new variable whose value is x.
+func varOf[T any](x T) *T { return &x }

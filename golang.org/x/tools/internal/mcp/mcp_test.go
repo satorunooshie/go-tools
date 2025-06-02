@@ -30,16 +30,18 @@ type hiParams struct {
 	Name string
 }
 
-func sayHi(ctx context.Context, ss *ServerSession, v hiParams) ([]*Content, error) {
+func sayHi(ctx context.Context, ss *ServerSession, params *CallToolParams[hiParams]) (*CallToolResult, error) {
 	if err := ss.Ping(ctx, nil); err != nil {
 		return nil, fmt.Errorf("ping failed: %v", err)
 	}
-	return []*Content{NewTextContent("hi " + v.Name)}, nil
+	return &CallToolResult{Content: []*Content{NewTextContent("hi " + params.Arguments.Name)}}, nil
 }
 
 func TestEndToEnd(t *testing.T) {
 	ctx := context.Background()
-	ct, st := NewInMemoryTransports()
+	var ct, st Transport = NewInMemoryTransports()
+	// ct = NewLoggingTransport(ct, os.Stderr)
+	// st = NewLoggingTransport(st, os.Stderr)
 
 	// Channels to check if notification callbacks happened.
 	notificationChans := map[string]chan int{}
@@ -115,7 +117,7 @@ func TestEndToEnd(t *testing.T) {
 	t.Run("prompts", func(t *testing.T) {
 		res, err := cs.ListPrompts(ctx, nil)
 		if err != nil {
-			t.Errorf("prompts/list failed: %v", err)
+			t.Fatalf("prompts/list failed: %v", err)
 		}
 		wantPrompts := []*Prompt{
 			{
@@ -185,7 +187,10 @@ func TestEndToEnd(t *testing.T) {
 			t.Fatalf("tools/list mismatch (-want +got):\n%s", diff)
 		}
 
-		gotHi, err := cs.CallTool(ctx, "greet", map[string]any{"name": "user"}, nil)
+		gotHi, err := CallTool(ctx, cs, &CallToolParams[map[string]any]{
+			Name:      "greet",
+			Arguments: map[string]any{"name": "user"},
+		})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -196,7 +201,10 @@ func TestEndToEnd(t *testing.T) {
 			t.Errorf("tools/call 'greet' mismatch (-want +got):\n%s", diff)
 		}
 
-		gotFail, err := cs.CallTool(ctx, "fail", map[string]any{}, nil)
+		gotFail, err := CallTool(ctx, cs, &CallToolParams[map[string]any]{
+			Name:      "fail",
+			Arguments: map[string]any{},
+		})
 		// Counter-intuitively, when a tool fails, we don't expect an RPC error for
 		// call tool: instead, the failure is embedded in the result.
 		if err != nil {
@@ -387,7 +395,7 @@ var (
 
 	tools = map[string]*ServerTool{
 		"greet": NewTool("greet", "say hi", sayHi),
-		"fail": NewTool("fail", "just fail", func(context.Context, *ServerSession, struct{}) ([]*Content, error) {
+		"fail": NewTool("fail", "just fail", func(context.Context, *ServerSession, *CallToolParams[struct{}]) (*CallToolResult, error) {
 			return nil, errTestFailure
 		}),
 	}
@@ -506,24 +514,30 @@ func basicConnection(t *testing.T, tools ...*ServerTool) (*ServerSession, *Clien
 }
 
 func TestServerClosing(t *testing.T) {
-	cc, c := basicConnection(t, NewTool("greet", "say hi", sayHi))
-	defer c.Close()
+	cc, cs := basicConnection(t, NewTool("greet", "say hi", sayHi))
+	defer cs.Close()
 
 	ctx := context.Background()
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
-		if err := c.Wait(); err != nil {
+		if err := cs.Wait(); err != nil {
 			t.Errorf("server connection failed: %v", err)
 		}
 		wg.Done()
 	}()
-	if _, err := c.CallTool(ctx, "greet", map[string]any{"name": "user"}, nil); err != nil {
+	if _, err := CallTool(ctx, cs, &CallToolParams[map[string]any]{
+		Name:      "greet",
+		Arguments: map[string]any{"name": "user"},
+	}); err != nil {
 		t.Fatalf("after connecting: %v", err)
 	}
 	cc.Close()
 	wg.Wait()
-	if _, err := c.CallTool(ctx, "greet", map[string]any{"name": "user"}, nil); !errors.Is(err, ErrConnectionClosed) {
+	if _, err := CallTool(ctx, cs, &CallToolParams[map[string]any]{
+		Name:      "greet",
+		Arguments: map[string]any{"name": "user"},
+	}); !errors.Is(err, ErrConnectionClosed) {
 		t.Errorf("after disconnection, got error %v, want EOF", err)
 	}
 }
@@ -572,7 +586,7 @@ func TestCancellation(t *testing.T) {
 		cancelled = make(chan struct{}, 1) // don't block the request
 	)
 
-	slowRequest := func(ctx context.Context, cc *ServerSession, v struct{}) ([]*Content, error) {
+	slowRequest := func(ctx context.Context, cc *ServerSession, params *CallToolParams[struct{}]) (*CallToolResult, error) {
 		start <- struct{}{}
 		select {
 		case <-ctx.Done():
@@ -582,11 +596,11 @@ func TestCancellation(t *testing.T) {
 		}
 		return nil, nil
 	}
-	_, sc := basicConnection(t, NewTool("slow", "a slow request", slowRequest))
-	defer sc.Close()
+	_, cs := basicConnection(t, NewTool("slow", "a slow request", slowRequest))
+	defer cs.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	go sc.CallTool(ctx, "slow", map[string]any{}, nil)
+	go CallTool(ctx, cs, &CallToolParams[struct{}]{Name: "slow"})
 	<-start
 	cancel()
 	select {
@@ -620,10 +634,12 @@ func TestMiddleware(t *testing.T) {
 
 	// "1" is the outer middleware layer, called first; then "2" is called, and finally
 	// the default dispatcher.
-	s.AddMiddleware(traceCalls[ServerSession](&sbuf, "1"), traceCalls[ServerSession](&sbuf, "2"))
+	s.AddSendingMiddleware(traceCalls[*ServerSession](&sbuf, "S1"), traceCalls[*ServerSession](&sbuf, "S2"))
+	s.AddReceivingMiddleware(traceCalls[*ServerSession](&sbuf, "R1"), traceCalls[*ServerSession](&sbuf, "R2"))
 
 	c := NewClient("testClient", "v1.0.0", nil)
-	c.AddMiddleware(traceCalls[ClientSession](&cbuf, "1"), traceCalls[ClientSession](&cbuf, "2"))
+	c.AddSendingMiddleware(traceCalls[*ClientSession](&cbuf, "S1"), traceCalls[*ClientSession](&cbuf, "S2"))
+	c.AddReceivingMiddleware(traceCalls[*ClientSession](&cbuf, "R1"), traceCalls[*ClientSession](&cbuf, "R2"))
 
 	cs, err := c.Connect(ctx, ct)
 	if err != nil {
@@ -632,42 +648,60 @@ func TestMiddleware(t *testing.T) {
 	if _, err := cs.ListTools(ctx, nil); err != nil {
 		t.Fatal(err)
 	}
-	want := `
-1 >initialize
-2 >initialize
-2 <initialize
-1 <initialize
-1 >notifications/initialized
-2 >notifications/initialized
-2 <notifications/initialized
-1 <notifications/initialized
-1 >tools/list
-2 >tools/list
-2 <tools/list
-1 <tools/list
-`
-	if diff := cmp.Diff(want, sbuf.String()); diff != "" {
-		t.Errorf("mismatch (-want, +got):\n%s", diff)
+	if _, err := ss.ListRoots(ctx, nil); err != nil {
+		t.Fatal(err)
 	}
 
-	_, _ = ss.ListRoots(ctx, nil)
-
-	want = `
-1 >roots/list
-2 >roots/list
-2 <roots/list
-1 <roots/list
+	wantServer := `
+R1 >initialize
+R2 >initialize
+R2 <initialize
+R1 <initialize
+R1 >notifications/initialized
+R2 >notifications/initialized
+R2 <notifications/initialized
+R1 <notifications/initialized
+R1 >tools/list
+R2 >tools/list
+R2 <tools/list
+R1 <tools/list
+S1 >roots/list
+S2 >roots/list
+S2 <roots/list
+S1 <roots/list
 `
-	if diff := cmp.Diff(want, cbuf.String()); diff != "" {
-		t.Errorf("mismatch (-want, +got):\n%s", diff)
+	if diff := cmp.Diff(wantServer, sbuf.String()); diff != "" {
+		t.Errorf("server mismatch (-want, +got):\n%s", diff)
+	}
+
+	wantClient := `
+S1 >initialize
+S2 >initialize
+S2 <initialize
+S1 <initialize
+S1 >notifications/initialized
+S2 >notifications/initialized
+S2 <notifications/initialized
+S1 <notifications/initialized
+S1 >tools/list
+S2 >tools/list
+S2 <tools/list
+S1 <tools/list
+R1 >roots/list
+R2 >roots/list
+R2 <roots/list
+R1 <roots/list
+`
+	if diff := cmp.Diff(wantClient, cbuf.String()); diff != "" {
+		t.Errorf("client mismatch (-want, +got):\n%s", diff)
 	}
 }
 
 // traceCalls creates a middleware function that prints the method before and after each call
 // with the given prefix.
-func traceCalls[S ClientSession | ServerSession](w io.Writer, prefix string) Middleware[S] {
+func traceCalls[S Session](w io.Writer, prefix string) Middleware[S] {
 	return func(h MethodHandler[S]) MethodHandler[S] {
-		return func(ctx context.Context, sess *S, method string, params Params) (Result, error) {
+		return func(ctx context.Context, sess S, method string, params Params) (Result, error) {
 			fmt.Fprintf(w, "%s >%s\n", prefix, method)
 			defer fmt.Fprintf(w, "%s <%s\n", prefix, method)
 			return h(ctx, sess, method, params)

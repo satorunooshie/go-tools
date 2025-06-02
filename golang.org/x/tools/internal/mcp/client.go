@@ -18,13 +18,14 @@ import (
 // A Client is an MCP client, which may be connected to an MCP server
 // using the [Client.Connect] method.
 type Client struct {
-	name           string
-	version        string
-	opts           ClientOptions
-	mu             sync.Mutex
-	roots          *featureSet[*Root]
-	sessions       []*ClientSession
-	methodHandler_ MethodHandler[ClientSession]
+	name                    string
+	version                 string
+	opts                    ClientOptions
+	mu                      sync.Mutex
+	roots                   *featureSet[*Root]
+	sessions                []*ClientSession
+	sendingMethodHandler_   MethodHandler[*ClientSession]
+	receivingMethodHandler_ MethodHandler[*ClientSession]
 }
 
 // NewClient creates a new Client.
@@ -34,10 +35,11 @@ type Client struct {
 // If non-nil, the provided options configure the Client.
 func NewClient(name, version string, opts *ClientOptions) *Client {
 	c := &Client{
-		name:           name,
-		version:        version,
-		roots:          newFeatureSet(func(r *Root) string { return r.URI }),
-		methodHandler_: defaultMethodHandler[ClientSession],
+		name:                    name,
+		version:                 version,
+		roots:                   newFeatureSet(func(r *Root) string { return r.URI }),
+		sendingMethodHandler_:   defaultSendingMethodHandler[*ClientSession],
+		receivingMethodHandler_: defaultReceivingMethodHandler[*ClientSession],
 	}
 	if opts != nil {
 		c.opts = *opts
@@ -103,11 +105,13 @@ func (c *Client) Connect(ctx context.Context, t Transport) (cs *ClientSession, e
 		ClientInfo:   &implementation{Name: c.name, Version: c.version},
 		Capabilities: caps,
 	}
-	if err := call(ctx, cs.conn, "initialize", params, &cs.initializeResult); err != nil {
+	res, err := handleSend[*InitializeResult](ctx, cs, methodInitialize, params)
+	if err != nil {
 		_ = cs.Close()
 		return nil, err
 	}
-	if err := cs.conn.Notify(ctx, notificationInitialized, &InitializedParams{}); err != nil {
+	cs.initializeResult = res
+	if err := handleNotify(ctx, cs, notificationInitialized, &InitializedParams{}); err != nil {
 		_ = cs.Close()
 		return nil, err
 	}
@@ -190,20 +194,38 @@ func (c *Client) createMessage(ctx context.Context, cs *ClientSession, params *C
 	return c.opts.CreateMessageHandler(ctx, cs, params)
 }
 
-// AddMiddleware wraps the client's current method handler using the provided
-// middleware. Middleware is applied from right to left, so that the first one
-// is executed first.
+// AddSendingMiddleware wraps the current sending method handler using the provided
+// middleware. Middleware is applied from right to left, so that the first one is
+// executed first.
 //
-// For example, AddMiddleware(m1, m2, m3) augments the client method handler as
+// For example, AddSendingMiddleware(m1, m2, m3) augments the method handler as
 // m1(m2(m3(handler))).
-func (c *Client) AddMiddleware(middleware ...Middleware[ClientSession]) {
+//
+// Sending middleware is called when a request is sent. It is useful for tasks
+// such as tracing, metrics, and adding progress tokens.
+func (c *Client) AddSendingMiddleware(middleware ...Middleware[*ClientSession]) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	addMiddleware(&c.methodHandler_, middleware)
+	addMiddleware(&c.sendingMethodHandler_, middleware)
+}
+
+// AddReceivingMiddleware wraps the current receiving method handler using
+// the provided middleware. Middleware is applied from right to left, so that the
+// first one is executed first.
+//
+// For example, AddReceivingMiddleware(m1, m2, m3) augments the method handler as
+// m1(m2(m3(handler))).
+//
+// Receiving middleware is called when a request is received. It is useful for tasks
+// such as authentication, request logging and metrics.
+func (c *Client) AddReceivingMiddleware(middleware ...Middleware[*ClientSession]) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	addMiddleware(&c.receivingMethodHandler_, middleware)
 }
 
 // clientMethodInfos maps from the RPC method name to serverMethodInfos.
-var clientMethodInfos = map[string]methodInfo[ClientSession]{
+var clientMethodInfos = map[string]methodInfo{
 	methodPing:                      newMethodInfo(sessionMethod((*ClientSession).ping)),
 	methodListRoots:                 newMethodInfo(clientMethod((*Client).listRoots)),
 	methodCreateMessage:             newMethodInfo(clientMethod((*Client).createMessage)),
@@ -213,88 +235,102 @@ var clientMethodInfos = map[string]methodInfo[ClientSession]{
 	notificationLoggingMessage:      newMethodInfo(clientMethod((*Client).callLoggingHandler)),
 }
 
-var _ session[ClientSession] = (*ClientSession)(nil)
+func (cs *ClientSession) sendingMethodInfos() map[string]methodInfo {
+	return serverMethodInfos
+}
 
-func (cs *ClientSession) methodInfos() map[string]methodInfo[ClientSession] {
+func (cs *ClientSession) receivingMethodInfos() map[string]methodInfo {
 	return clientMethodInfos
 }
 
 func (cs *ClientSession) handle(ctx context.Context, req *jsonrpc2.Request) (any, error) {
-	return handleRequest(ctx, req, cs)
+	return handleReceive(ctx, cs, req)
 }
 
-func (cs *ClientSession) methodHandler() MethodHandler[ClientSession] {
+func (cs *ClientSession) sendingMethodHandler() methodHandler {
 	cs.client.mu.Lock()
 	defer cs.client.mu.Unlock()
-	return cs.client.methodHandler_
+	return cs.client.sendingMethodHandler_
+}
+
+func (cs *ClientSession) receivingMethodHandler() methodHandler {
+	cs.client.mu.Lock()
+	defer cs.client.mu.Unlock()
+	return cs.client.receivingMethodHandler_
 }
 
 // getConn implements [session.getConn].
 func (cs *ClientSession) getConn() *jsonrpc2.Connection { return cs.conn }
 
-func (cs *ClientSession) ping(ct context.Context, params *PingParams) (Result, error) {
-	return emptyResult{}, nil
+func (*ClientSession) ping(context.Context, *PingParams) (*emptyResult, error) {
+	return &emptyResult{}, nil
 }
 
 // Ping makes an MCP "ping" request to the server.
 func (cs *ClientSession) Ping(ctx context.Context, params *PingParams) error {
-	return call(ctx, cs.conn, methodPing, params, nil)
+	_, err := handleSend[*emptyResult](ctx, cs, methodPing, params)
+	return err
 }
 
 // ListPrompts lists prompts that are currently available on the server.
 func (cs *ClientSession) ListPrompts(ctx context.Context, params *ListPromptsParams) (*ListPromptsResult, error) {
-	return standardCall[ListPromptsResult](ctx, cs.conn, methodListPrompts, params)
+	return handleSend[*ListPromptsResult](ctx, cs, methodListPrompts, params)
 }
 
 // GetPrompt gets a prompt from the server.
 func (cs *ClientSession) GetPrompt(ctx context.Context, params *GetPromptParams) (*GetPromptResult, error) {
-	return standardCall[GetPromptResult](ctx, cs.conn, methodGetPrompt, params)
+	return handleSend[*GetPromptResult](ctx, cs, methodGetPrompt, params)
 }
 
 // ListTools lists tools that are currently available on the server.
 func (cs *ClientSession) ListTools(ctx context.Context, params *ListToolsParams) (*ListToolsResult, error) {
-	return standardCall[ListToolsResult](ctx, cs.conn, methodListTools, params)
+	return handleSend[*ListToolsResult](ctx, cs, methodListTools, params)
 }
 
 // CallTool calls the tool with the given name and arguments.
 // Pass a [CallToolOptions] to provide additional request fields.
-func (cs *ClientSession) CallTool(ctx context.Context, name string, args map[string]any, opts *CallToolOptions) (_ *CallToolResult, err error) {
-	defer func() {
-		if err != nil {
-			err = fmt.Errorf("calling tool %q: %w", name, err)
-		}
-	}()
+func (cs *ClientSession) CallTool(ctx context.Context, params *CallToolParams[json.RawMessage]) (*CallToolResult, error) {
+	return handleSend[*CallToolResult](ctx, cs, methodCallTool, params)
+}
 
-	data, err := json.Marshal(args)
+// CallTool is a helper to call a tool with any argument type. It returns an
+// error if params.Arguments fails to marshal to JSON.
+func CallTool[TArgs any](ctx context.Context, cs *ClientSession, params *CallToolParams[TArgs]) (*CallToolResult, error) {
+	wireParams, err := toWireParams(params)
 	if err != nil {
-		return nil, fmt.Errorf("marshaling arguments: %w", err)
+		return nil, err
 	}
-	params := &CallToolParams{
-		Name:      name,
-		Arguments: json.RawMessage(data),
+	return cs.CallTool(ctx, wireParams)
+}
+
+func toWireParams[TArgs any](params *CallToolParams[TArgs]) (*CallToolParams[json.RawMessage], error) {
+	data, err := json.Marshal(params.Arguments)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal arguments: %v", err)
 	}
-	return standardCall[CallToolResult](ctx, cs.conn, methodCallTool, params)
+	// The field mapping here must be kept up to date with the CallToolParams.
+	// This is partially enforced by TestToWireParams, which verifies that all
+	// comparable fields are mapped.
+	return &CallToolParams[json.RawMessage]{
+		Meta:      params.Meta,
+		Name:      params.Name,
+		Arguments: data,
+	}, nil
 }
 
 func (cs *ClientSession) SetLevel(ctx context.Context, params *SetLevelParams) error {
-	return call(ctx, cs.conn, methodSetLevel, params, nil)
-}
-
-// NOTE: the following struct should consist of all fields of callToolParams except name and arguments.
-
-// CallToolOptions contains options to [ClientSession.CallTool].
-type CallToolOptions struct {
-	ProgressToken any // string or int
+	_, err := handleSend[*emptyResult](ctx, cs, methodSetLevel, params)
+	return err
 }
 
 // ListResources lists the resources that are currently available on the server.
 func (cs *ClientSession) ListResources(ctx context.Context, params *ListResourcesParams) (*ListResourcesResult, error) {
-	return standardCall[ListResourcesResult](ctx, cs.conn, methodListResources, params)
+	return handleSend[*ListResourcesResult](ctx, cs, methodListResources, params)
 }
 
 // ReadResource ask the server to read a resource and return its contents.
 func (cs *ClientSession) ReadResource(ctx context.Context, params *ReadResourceParams) (*ReadResourceResult, error) {
-	return standardCall[ReadResourceResult](ctx, cs.conn, methodReadResource, params)
+	return handleSend[*ReadResourceResult](ctx, cs, methodReadResource, params)
 }
 
 func (c *Client) callToolChangedHandler(ctx context.Context, s *ClientSession, params *ToolListChangedParams) (Result, error) {
@@ -319,27 +355,72 @@ func (c *Client) callLoggingHandler(ctx context.Context, cs *ClientSession, para
 // Tools provides an iterator for all tools available on the server,
 // automatically fetching pages and managing cursors.
 // The `params` argument can set the initial cursor.
+// Iteration stops at the first encountered error, which will be yielded.
 func (cs *ClientSession) Tools(ctx context.Context, params *ListToolsParams) iter.Seq2[Tool, error] {
-	currentParams := &ListToolsParams{}
-	if params != nil {
-		*currentParams = *params
+	if params == nil {
+		params = &ListToolsParams{}
 	}
-	return func(yield func(Tool, error) bool) {
+	return paginate(ctx, params, cs.ListTools, func(res *ListToolsResult) []*Tool {
+		return res.Tools
+	})
+}
+
+// Resources provides an iterator for all resources available on the server,
+// automatically fetching pages and managing cursors.
+// The `params` argument can set the initial cursor.
+// Iteration stops at the first encountered error, which will be yielded.
+func (cs *ClientSession) Resources(ctx context.Context, params *ListResourcesParams) iter.Seq2[Resource, error] {
+	if params == nil {
+		params = &ListResourcesParams{}
+	}
+	return paginate(ctx, params, cs.ListResources, func(res *ListResourcesResult) []*Resource {
+		return res.Resources
+	})
+}
+
+// Prompts provides an iterator for all prompts available on the server,
+// automatically fetching pages and managing cursors.
+// The `params` argument can set the initial cursor.
+// Iteration stops at the first encountered error, which will be yielded.
+func (cs *ClientSession) Prompts(ctx context.Context, params *ListPromptsParams) iter.Seq2[Prompt, error] {
+	if params == nil {
+		params = &ListPromptsParams{}
+	}
+	return paginate(ctx, params, cs.ListPrompts, func(res *ListPromptsResult) []*Prompt {
+		return res.Prompts
+	})
+}
+
+type ListParams interface {
+	// Returns a pointer to the param's Cursor field.
+	cursorPtr() *string
+}
+
+type ListResult[T any] interface {
+	// Returns a pointer to the param's NextCursor field.
+	nextCursorPtr() *string
+}
+
+// paginate is a generic helper function to provide a paginated iterator.
+func paginate[P ListParams, R ListResult[E], E any](ctx context.Context, params P, listFunc func(context.Context, P) (R, error), items func(R) []*E) iter.Seq2[E, error] {
+	return func(yield func(E, error) bool) {
 		for {
-			res, err := cs.ListTools(ctx, currentParams)
+			res, err := listFunc(ctx, params)
 			if err != nil {
-				yield(Tool{}, err)
+				var zero E
+				yield(zero, err)
 				return
 			}
-			for _, t := range res.Tools {
-				if !yield(*t, nil) {
+			for _, r := range items(res) {
+				if !yield(*r, nil) {
 					return
 				}
 			}
-			if res.NextCursor == "" {
+			nextCursorVal := res.nextCursorPtr()
+			if nextCursorVal == nil || *nextCursorVal == "" {
 				return
 			}
-			currentParams.Cursor = res.NextCursor
+			*params.cursorPtr() = *nextCursorVal
 		}
 	}
 }

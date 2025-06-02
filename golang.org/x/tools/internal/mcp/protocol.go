@@ -7,8 +7,6 @@
 package mcp
 
 import (
-	"encoding/json"
-
 	"golang.org/x/tools/internal/mcp/jsonschema"
 )
 
@@ -28,15 +26,15 @@ type Annotations struct {
 	Priority float64 `json:"priority,omitempty"`
 }
 
-type CallToolParams struct {
+type CallToolParams[TArgs any] struct {
 	// This property is reserved by the protocol to allow clients and servers to
 	// attach additional metadata to their responses.
-	Meta      Meta            `json:"_meta,omitempty"`
-	Arguments json.RawMessage `json:"arguments,omitempty"`
-	Name      string          `json:"name"`
+	Meta      Meta   `json:"_meta,omitempty"`
+	Arguments TArgs  `json:"arguments,omitempty"`
+	Name      string `json:"name"`
 }
 
-func (x *CallToolParams) GetMeta() *Meta { return &x.Meta }
+func (x *CallToolParams[TArgs]) GetMeta() *Meta { return &x.Meta }
 
 // The server's response to a tool call.
 //
@@ -214,7 +212,8 @@ type ListPromptsParams struct {
 	Cursor string `json:"cursor,omitempty"`
 }
 
-func (x *ListPromptsParams) GetMeta() *Meta { return &x.Meta }
+func (x *ListPromptsParams) GetMeta() *Meta     { return &x.Meta }
+func (x *ListPromptsParams) cursorPtr() *string { return &x.Cursor }
 
 // The server's response to a prompts/list request from the client.
 type ListPromptsResult struct {
@@ -227,7 +226,8 @@ type ListPromptsResult struct {
 	Prompts    []*Prompt `json:"prompts"`
 }
 
-func (x *ListPromptsResult) GetMeta() *Meta { return &x.Meta }
+func (x *ListPromptsResult) GetMeta() *Meta         { return &x.Meta }
+func (x *ListPromptsResult) nextCursorPtr() *string { return &x.NextCursor }
 
 type ListResourcesParams struct {
 	// This property is reserved by the protocol to allow clients and servers to
@@ -238,7 +238,8 @@ type ListResourcesParams struct {
 	Cursor string `json:"cursor,omitempty"`
 }
 
-func (x *ListResourcesParams) GetMeta() *Meta { return &x.Meta }
+func (x *ListResourcesParams) GetMeta() *Meta     { return &x.Meta }
+func (x *ListResourcesParams) cursorPtr() *string { return &x.Cursor }
 
 // The server's response to a resources/list request from the client.
 type ListResourcesResult struct {
@@ -251,7 +252,8 @@ type ListResourcesResult struct {
 	Resources  []*Resource `json:"resources"`
 }
 
-func (x *ListResourcesResult) GetMeta() *Meta { return &x.Meta }
+func (x *ListResourcesResult) GetMeta() *Meta         { return &x.Meta }
+func (x *ListResourcesResult) nextCursorPtr() *string { return &x.NextCursor }
 
 type ListRootsParams struct {
 	// This property is reserved by the protocol to allow clients and servers to
@@ -282,7 +284,8 @@ type ListToolsParams struct {
 	Cursor string `json:"cursor,omitempty"`
 }
 
-func (x *ListToolsParams) GetMeta() *Meta { return &x.Meta }
+func (x *ListToolsParams) GetMeta() *Meta     { return &x.Meta }
+func (x *ListToolsParams) cursorPtr() *string { return &x.Cursor }
 
 // The server's response to a tools/list request from the client.
 type ListToolsResult struct {
@@ -295,7 +298,8 @@ type ListToolsResult struct {
 	Tools      []*Tool `json:"tools"`
 }
 
-func (x *ListToolsResult) GetMeta() *Meta { return &x.Meta }
+func (x *ListToolsResult) GetMeta() *Meta         { return &x.Meta }
+func (x *ListToolsResult) nextCursorPtr() *string { return &x.NextCursor }
 
 // The severity of a log message.
 //
