@@ -9,8 +9,8 @@ package jsonschema
 import (
 	"fmt"
 	"reflect"
-	"slices"
-	"strings"
+
+	"golang.org/x/tools/internal/mcp/internal/util"
 )
 
 // For constructs a JSON schema object for the given type argument.
@@ -42,15 +42,21 @@ func For[T any]() (*Schema, error) {
 //   - complex numbers
 //   - unsafe pointers
 //
+// The cannot be any cycles in the types.
 // TODO(rfindley): we could perhaps just skip these incompatible fields.
 func ForType(t reflect.Type) (*Schema, error) {
 	return typeSchema(t)
 }
 
 func typeSchema(t reflect.Type) (*Schema, error) {
-	if t.Kind() == reflect.Pointer {
+	// Follow pointers: the schema for *T is almost the same as for T, except that
+	// an explicit JSON "null" is allowed for the pointer.
+	allowNull := false
+	for t.Kind() == reflect.Pointer {
+		allowNull = true
 		t = t.Elem()
 	}
+
 	var (
 		s   = new(Schema)
 		err error
@@ -102,44 +108,28 @@ func typeSchema(t reflect.Type) (*Schema, error) {
 
 		for i := range t.NumField() {
 			field := t.Field(i)
-			name, required, include := parseField(field)
-			if !include {
+			info := util.FieldJSONInfo(field)
+			if info.Omit {
 				continue
 			}
 			if s.Properties == nil {
 				s.Properties = make(map[string]*Schema)
 			}
-			s.Properties[name], err = typeSchema(field.Type)
+			s.Properties[info.Name], err = typeSchema(field.Type)
 			if err != nil {
 				return nil, err
 			}
-			if required {
-				s.Required = append(s.Required, name)
+			if !info.Settings["omitempty"] && !info.Settings["omitzero"] {
+				s.Required = append(s.Required, info.Name)
 			}
 		}
 
 	default:
 		return nil, fmt.Errorf("type %v is unsupported by jsonschema", t)
 	}
+	if allowNull && s.Type != "" {
+		s.Types = []string{"null", s.Type}
+		s.Type = ""
+	}
 	return s, nil
-}
-
-func parseField(f reflect.StructField) (name string, required, include bool) {
-	if !f.IsExported() {
-		return "", false, false
-	}
-	name = f.Name
-	required = true
-	if tag, ok := f.Tag.Lookup("json"); ok {
-		props := strings.Split(tag, ",")
-		if props[0] != "" {
-			if props[0] == "-" {
-				return "", false, false
-			}
-			name = props[0]
-		}
-		// TODO: support 'omitzero' as well.
-		required = !slices.Contains(props[1:], "omitempty")
-	}
-	return name, required, true
 }

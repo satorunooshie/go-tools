@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"unicode/utf8"
+
+	"golang.org/x/tools/internal/mcp/internal/util"
 )
 
 // The value of the "$schema" keyword for the version that we can validate.
@@ -662,8 +664,8 @@ func property(v reflect.Value, name string) reflect.Value {
 	case reflect.Struct:
 		props := structPropertiesOf(v.Type())
 		// Ignore nonexistent properties.
-		if index, ok := props[name]; ok {
-			return v.FieldByIndex(index)
+		if sf, ok := props[name]; ok {
+			return v.FieldByIndex(sf.Index)
 		}
 		return reflect.Value{}
 	default:
@@ -673,6 +675,8 @@ func property(v reflect.Value, name string) reflect.Value {
 
 // properties returns an iterator over the names and values of all properties
 // in v, which must be a map or a struct.
+// If a struct, zero-valued properties that are marked omitempty or omitzero
+// are excluded.
 func properties(v reflect.Value) iter.Seq2[string, reflect.Value] {
 	return func(yield func(string, reflect.Value) bool) {
 		switch v.Kind() {
@@ -683,8 +687,15 @@ func properties(v reflect.Value) iter.Seq2[string, reflect.Value] {
 				}
 			}
 		case reflect.Struct:
-			for name, index := range structPropertiesOf(v.Type()) {
-				if !yield(name, v.FieldByIndex(index)) {
+			for name, sf := range structPropertiesOf(v.Type()) {
+				val := v.FieldByIndex(sf.Index)
+				if val.IsZero() {
+					info := util.FieldJSONInfo(sf)
+					if info.Settings["omitempty"] || info.Settings["omitzero"] {
+						continue
+					}
+				}
+				if !yield(name, val) {
 					return
 				}
 			}
@@ -707,8 +718,8 @@ func numPropertiesBounds(v reflect.Value, isRequired map[string]bool) (int, int)
 	case reflect.Struct:
 		sp := structPropertiesOf(v.Type())
 		min := 0
-		for prop, index := range sp {
-			if !v.FieldByIndex(index).IsZero() || isRequired[prop] {
+		for prop, sf := range sp {
+			if !v.FieldByIndex(sf.Index).IsZero() || isRequired[prop] {
 				min++
 			}
 		}
@@ -719,7 +730,7 @@ func numPropertiesBounds(v reflect.Value, isRequired map[string]bool) (int, int)
 }
 
 // A propertyMap is a map from property name to struct field index.
-type propertyMap = map[string][]int
+type propertyMap = map[string]reflect.StructField
 
 var structProperties sync.Map // from reflect.Type to propertyMap
 
@@ -730,32 +741,13 @@ func structPropertiesOf(t reflect.Type) propertyMap {
 	if props, ok := structProperties.Load(t); ok {
 		return props.(propertyMap)
 	}
-	props := map[string][]int{}
+	props := map[string]reflect.StructField{}
 	for _, sf := range reflect.VisibleFields(t) {
-		if name, ok := jsonName(sf); ok {
-			props[name] = sf.Index
+		info := util.FieldJSONInfo(sf)
+		if !info.Omit {
+			props[info.Name] = sf
 		}
 	}
 	structProperties.Store(t, props)
 	return props
-}
-
-// jsonName returns the name for f as would be used by [json.Marshal].
-// That is the name in the json struct tag, or the field name if there is no tag.
-// If f is not exported or the tag is "-", jsonName returns "", false.
-func jsonName(f reflect.StructField) (string, bool) {
-	if !f.IsExported() {
-		return "", false
-	}
-	if tag, ok := f.Tag.Lookup("json"); ok {
-		name, _, found := strings.Cut(tag, ",")
-		// "-" means omit, but "-," means the name is "-"
-		if name == "-" && !found {
-			return "", false
-		}
-		if name != "" {
-			return name, true
-		}
-	}
-	return f.Name, true
 }
