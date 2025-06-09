@@ -328,6 +328,11 @@ func (cs *ClientSession) ListResources(ctx context.Context, params *ListResource
 	return handleSend[*ListResourcesResult](ctx, cs, methodListResources, params)
 }
 
+// ListResourceTemplates lists the resource templates that are currently available on the server.
+func (cs *ClientSession) ListResourceTemplates(ctx context.Context, params *ListResourceTemplatesParams) (*ListResourceTemplatesResult, error) {
+	return handleSend[*ListResourceTemplatesResult](ctx, cs, methodListResourceTemplates, params)
+}
+
 // ReadResource ask the server to read a resource and return its contents.
 func (cs *ClientSession) ReadResource(ctx context.Context, params *ReadResourceParams) (*ReadResourceResult, error) {
 	return handleSend[*ReadResourceResult](ctx, cs, methodReadResource, params)
@@ -375,6 +380,19 @@ func (cs *ClientSession) Resources(ctx context.Context, params *ListResourcesPar
 	}
 	return paginate(ctx, params, cs.ListResources, func(res *ListResourcesResult) []*Resource {
 		return res.Resources
+	})
+}
+
+// ResourceTemplates provides an iterator for all resource templates available on the server,
+// automatically fetching pages and managing cursors.
+// The `params` argument can set the initial cursor.
+// Iteration stops at the first encountered error, which will be yielded.
+func (cs *ClientSession) ResourceTemplates(ctx context.Context, params *ListResourceTemplatesParams) iter.Seq2[ResourceTemplate, error] {
+	if params == nil {
+		params = &ListResourceTemplatesParams{}
+	}
+	return paginate(ctx, params, cs.ListResourceTemplates, func(res *ListResourceTemplatesResult) []*ResourceTemplate {
+		return res.ResourceTemplates
 	})
 }
 
