@@ -20,8 +20,8 @@ import (
 // Perhaps this should be an alias for ToolHandlerFor[map[string]any, map[string]any].
 type ToolHandler func(context.Context, *ServerSession, *CallToolParamsFor[map[string]any]) (*CallToolResult, error)
 
-// A ToolHandlerFor[Treq, Tres] handles a call to tools/call with typed arguments and results.
-type ToolHandlerFor[Treq, Tres any] func(context.Context, *ServerSession, *CallToolParamsFor[Treq]) (*CallToolResultFor[Tres], error)
+// A ToolHandlerFor handles a call to tools/call with typed arguments and results.
+type ToolHandlerFor[In, Out any] func(context.Context, *ServerSession, *CallToolParamsFor[In]) (*CallToolResultFor[Out], error)
 
 // A rawToolHandler is like a ToolHandler, but takes the arguments as as json.RawMessage.
 type rawToolHandler = func(context.Context, *ServerSession, *CallToolParamsFor[json.RawMessage]) (*CallToolResult, error)
@@ -30,31 +30,31 @@ type rawToolHandler = func(context.Context, *ServerSession, *CallToolParamsFor[j
 type ServerTool struct {
 	Tool    *Tool
 	Handler ToolHandler
-	// Set in NewTool or Server.AddToolsErr.
+	// Set in NewServerTool or Server.AddToolsErr.
 	rawHandler rawToolHandler
 	// Resolved tool schemas. Set in Server.AddToolsErr.
 	inputResolved, outputResolved *jsonschema.Resolved
 }
 
-// NewTool is a helper to make a tool using reflection on the given type parameters.
-// When the tool is called, CallToolParams.Arguments will be of type TReq.
+// NewServerTool is a helper to make a tool using reflection on the given type parameters.
+// When the tool is called, CallToolParams.Arguments will be of type In.
 //
 // If provided, variadic [ToolOption] values may be used to customize the tool.
 //
 // The input schema for the tool is extracted from the request type for the
 // handler, and used to unmmarshal and validate requests to the handler. This
 // schema may be customized using the [Input] option.
-func NewTool[TReq, TRes any](name, description string, handler ToolHandlerFor[TReq, TRes], opts ...ToolOption) *ServerTool {
-	st, err := newToolErr[TReq, TRes](name, description, handler, opts...)
+func NewServerTool[In, Out any](name, description string, handler ToolHandlerFor[In, Out], opts ...ToolOption) *ServerTool {
+	st, err := newServerToolErr[In, Out](name, description, handler, opts...)
 	if err != nil {
-		panic(fmt.Errorf("NewTool(%q): %w", name, err))
+		panic(fmt.Errorf("NewServerTool(%q): %w", name, err))
 	}
 	return st
 }
 
-func newToolErr[TReq, TRes any](name, description string, handler ToolHandlerFor[TReq, TRes], opts ...ToolOption) (*ServerTool, error) {
-	// TODO: check that TReq is a struct.
-	ischema, err := jsonschema.For[TReq]()
+func newServerToolErr[In, Out any](name, description string, handler ToolHandlerFor[In, Out], opts ...ToolOption) (*ServerTool, error) {
+	// TODO: check that In is a struct.
+	ischema, err := jsonschema.For[In]()
 	if err != nil {
 		return nil, err
 	}
@@ -77,12 +77,14 @@ func newToolErr[TReq, TRes any](name, description string, handler ToolHandlerFor
 	}
 
 	t.rawHandler = func(ctx context.Context, ss *ServerSession, rparams *CallToolParamsFor[json.RawMessage]) (*CallToolResult, error) {
-		var args TReq
-		if err := unmarshalSchema(rparams.Arguments, t.inputResolved, &args); err != nil {
-			return nil, err
+		var args In
+		if rparams.Arguments != nil {
+			if err := unmarshalSchema(rparams.Arguments, t.inputResolved, &args); err != nil {
+				return nil, err
+			}
 		}
 		// TODO(jba): future-proof this copy.
-		params := &CallToolParamsFor[TReq]{
+		params := &CallToolParamsFor[In]{
 			Meta:      rparams.Meta,
 			Name:      rparams.Name,
 			Arguments: args,
@@ -104,7 +106,7 @@ func newToolErr[TReq, TRes any](name, description string, handler ToolHandlerFor
 	return t, nil
 }
 
-// newRawHandler creates a rawToolHandler for tools not created through NewTool.
+// newRawHandler creates a rawToolHandler for tools not created through NewServerTool.
 // It unmarshals the arguments into a map[string]any and validates them against the
 // schema, then calls the ServerTool's handler.
 func newRawHandler(st *ServerTool) rawToolHandler {
@@ -114,8 +116,10 @@ func newRawHandler(st *ServerTool) rawToolHandler {
 	return func(ctx context.Context, ss *ServerSession, rparams *CallToolParamsFor[json.RawMessage]) (*CallToolResult, error) {
 		// Unmarshal the args into what should be a map.
 		var args map[string]any
-		if err := unmarshalSchema(rparams.Arguments, st.inputResolved, &args); err != nil {
-			return nil, err
+		if rparams.Arguments != nil {
+			if err := unmarshalSchema(rparams.Arguments, st.inputResolved, &args); err != nil {
+				return nil, err
+			}
 		}
 		// TODO: generate copy
 		params := &CallToolParamsFor[map[string]any]{

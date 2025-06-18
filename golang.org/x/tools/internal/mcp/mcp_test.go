@@ -40,8 +40,6 @@ func sayHi(ctx context.Context, ss *ServerSession, params *CallToolParamsFor[hiP
 func TestEndToEnd(t *testing.T) {
 	ctx := context.Background()
 	var ct, st Transport = NewInMemoryTransports()
-	// ct = NewLoggingTransport(ct, os.Stderr)
-	// st = NewLoggingTransport(st, os.Stderr)
 
 	// Channels to check if notification callbacks happened.
 	notificationChans := map[string]chan int{}
@@ -433,7 +431,7 @@ var (
 	errTestFailure = errors.New("mcp failure")
 
 	tools = map[string]*ServerTool{
-		"greet": NewTool("greet", "say hi", sayHi),
+		"greet": NewServerTool("greet", "say hi", sayHi),
 		"fail": {
 			Tool: &Tool{Name: "fail"},
 			Handler: func(context.Context, *ServerSession, *CallToolParamsFor[map[string]any]) (*CallToolResult, error) {
@@ -443,7 +441,7 @@ var (
 	}
 
 	prompts = map[string]*ServerPrompt{
-		"code_review": NewPrompt("code_review", "do a code review",
+		"code_review": NewServerPrompt("code_review", "do a code review",
 			func(_ context.Context, _ *ServerSession, params struct{ Code string }, _ *GetPromptParams) (*GetPromptResult, error) {
 				return &GetPromptResult{
 					Description: "Code review prompt",
@@ -452,7 +450,7 @@ var (
 					},
 				}, nil
 			}),
-		"fail": NewPrompt("fail", "", func(_ context.Context, _ *ServerSession, args struct{}, _ *GetPromptParams) (*GetPromptResult, error) {
+		"fail": NewServerPrompt("fail", "", func(_ context.Context, _ *ServerSession, args struct{}, _ *GetPromptParams) (*GetPromptResult, error) {
 			return nil, errTestFailure
 		}),
 	}
@@ -556,7 +554,7 @@ func basicConnection(t *testing.T, tools ...*ServerTool) (*ServerSession, *Clien
 }
 
 func TestServerClosing(t *testing.T) {
-	cc, cs := basicConnection(t, NewTool("greet", "say hi", sayHi))
+	cc, cs := basicConnection(t, NewServerTool("greet", "say hi", sayHi))
 	defer cs.Close()
 
 	ctx := context.Background()
@@ -597,8 +595,8 @@ func TestBatching(t *testing.T) {
 	c := NewClient("testClient", "v1.0.0", nil)
 	// TODO: this test is broken, because increasing the batch size here causes
 	// 'initialize' to block. Therefore, we can only test with a size of 1.
+	// Since batching is being removed, we can probably just delete this.
 	const batchSize = 1
-	BatchSize(ct, batchSize)
 	cs, err := c.Connect(ctx, ct)
 	if err != nil {
 		t.Fatal(err)
@@ -659,6 +657,7 @@ func TestCancellation(t *testing.T) {
 func TestMiddleware(t *testing.T) {
 	ctx := context.Background()
 	ct, st := NewInMemoryTransports()
+
 	s := NewServer("testServer", "v1.0.0", nil)
 	ss, err := s.Connect(ctx, st)
 	if err != nil {
@@ -740,6 +739,69 @@ R1 <roots/list
 `
 	if diff := cmp.Diff(wantClient, cbuf.String()); diff != "" {
 		t.Errorf("client mismatch (-want, +got):\n%s", diff)
+	}
+}
+
+type safeBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *safeBuffer) Write(data []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(data)
+}
+
+func (b *safeBuffer) Bytes() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Bytes()
+}
+
+func TestNoJSONNull(t *testing.T) {
+	ctx := context.Background()
+	var ct, st Transport = NewInMemoryTransports()
+
+	// Collect logs, to sanity check that we don't write JSON null anywhere.
+	var logbuf safeBuffer
+	ct = NewLoggingTransport(ct, &logbuf)
+
+	s := NewServer("testServer", "v1.0.0", nil)
+	ss, err := s.Connect(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewClient("testClient", "v1.0.0", nil)
+	cs, err := c.Connect(ctx, ct)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cs.ListTools(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cs.ListPrompts(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cs.ListResources(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cs.ListResourceTemplates(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ss.ListRoots(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	cs.Close()
+	ss.Wait()
+
+	logs := logbuf.Bytes()
+	if i := bytes.Index(logs, []byte("null")); i >= 0 {
+		start := max(i-20, 0)
+		end := min(i+20, len(logs))
+		t.Errorf("conformance violation: MCP logs contain JSON null: %s", "..."+string(logs[start:end])+"...")
 	}
 }
 

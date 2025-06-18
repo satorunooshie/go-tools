@@ -116,7 +116,6 @@ func (s *Server) RemovePrompts(names ...string) {
 // The arguments must not be modified after this call.
 //
 // AddTools panics if errors are detected.
-// Call [AddToolsErr] to obtain an error instead.
 func (s *Server) AddTools(tools ...*ServerTool) {
 	if err := s.addToolsErr(tools...); err != nil {
 		panic(err)
@@ -132,7 +131,7 @@ func (s *Server) addToolsErr(tools ...*ServerTool) error {
 	// Wrap the user's Handlers with rawHandlers that take a json.RawMessage.
 	for _, st := range tools {
 		if st.rawHandler == nil {
-			// This ServerTool was not created with NewTool.
+			// This ServerTool was not created with NewServerTool.
 			if st.Handler == nil {
 				return fmt.Errorf("AddTools: tool %q has no handler", st.Tool.Name)
 			}
@@ -502,17 +501,19 @@ func (ss *ServerSession) Ping(ctx context.Context, params *PingParams) error {
 
 // ListRoots lists the client roots.
 func (ss *ServerSession) ListRoots(ctx context.Context, params *ListRootsParams) (*ListRootsResult, error) {
-	return handleSend[*ListRootsResult](ctx, ss, methodListRoots, params)
+	return handleSend[*ListRootsResult](ctx, ss, methodListRoots, orZero[Params](params))
 }
 
 // CreateMessage sends a sampling request to the client.
 func (ss *ServerSession) CreateMessage(ctx context.Context, params *CreateMessageParams) (*CreateMessageResult, error) {
-	return handleSend[*CreateMessageResult](ctx, ss, methodCreateMessage, params)
+	return handleSend[*CreateMessageResult](ctx, ss, methodCreateMessage, orZero[Params](params))
 }
 
 // LoggingMessage sends a logging message to the client.
 // The message is not sent if the client has not called SetLevel, or if its level
 // is below that of the last SetLevel.
+//
+// TODO(jba): rename to Log or LogMessage. A logging message is the thing that is sent to logging.
 func (ss *ServerSession) LoggingMessage(ctx context.Context, params *LoggingMessageParams) error {
 	ss.mu.Lock()
 	logLevel := ss.logLevel
@@ -610,9 +611,10 @@ func (ss *ServerSession) handle(ctx context.Context, req *jsonrpc2.Request) (any
 			return nil, fmt.Errorf("method %q is invalid during session initialization", req.Method)
 		}
 	}
-	// TODO(rfindley): embed the incoming request ID in the client context (or, more likely,
-	// a wrapper around it), so that we can correlate responses and notifications
-	// to the handler; this is required for the new session-based transport.
+	// For the streamable transport, we need the request ID to correlate
+	// server->client calls and notifications to the incoming request from which
+	// they originated. See [idContext] for details.
+	ctx = context.WithValue(ctx, idContextKey{}, req.ID)
 	return handleReceive(ctx, ss, req)
 }
 
@@ -632,9 +634,16 @@ func (ss *ServerSession) initialize(ctx context.Context, params *InitializeParam
 		ss.mu.Unlock()
 	}()
 
+	version := "2025-03-26" // preferred version
+	switch v := params.ProtocolVersion; v {
+	case "2024-11-05", "2025-03-26":
+		version = v
+	}
+
 	return &InitializeResult{
-		// TODO(rfindley): support multiple protocol versions.
-		ProtocolVersion: "2024-11-05",
+		// TODO(rfindley): alter behavior when falling back to an older version:
+		// reject unsupported features.
+		ProtocolVersion: version,
 		Capabilities: &serverCapabilities{
 			Prompts: &promptCapabilities{
 				ListChanged: true,
