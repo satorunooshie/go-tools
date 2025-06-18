@@ -44,7 +44,7 @@ The JSON-RPC implementation is hidden, to avoid tight coupling. As described in 
 
 ### JSON-RPC and Transports
 
-The MCP is defined in terms of client-server communication over bidirectional JSON-RPC message streams. Specifically, version `2025-03-26` of the spec defines two transports:
+The MCP is defined in terms of client-server communication over bidirectional JSON-RPC message connections. Specifically, version `2025-03-26` of the spec defines two transports:
 
 - **stdio**: communication with a subprocess over stdin/stdout.
 - **streamable http**: communication over a relatively complicated series of text/event-stream GET and HTTP POST requests.
@@ -55,17 +55,24 @@ Additionally, version `2024-11-05` of the spec defined a simpler (yet stateful) 
 
 Furthermore, the spec [states](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#custom-transports) that it must be possible for users to define their own custom transports.
 
-Given the diversity of the transport implementations, they can be challenging to abstract. However, since JSON-RPC requires a bidirectional stream, we can use this to model the MCP transport abstraction:
+Given the diversity of the transport implementations, they can be challenging to abstract. However, since JSON-RPC requires a bidirectional connection, we can use this to model the MCP transport abstraction:
 
 ```go
+type (
+	JSONRPCID       = jsonrpc2.ID
+	JSONRPCMessage  = jsonrpc2.Message
+	JSONRPCRequest  = jsonrpc2.Request
+	JSONRPCResponse = jsonrpc2.Response
+)
+
 // A Transport is used to create a bidirectional connection between MCP client
 // and server.
 type Transport interface {
-    Connect(ctx context.Context) (Stream, error)
+    Connect(ctx context.Context) (Connection, error)
 }
 
-// A Stream is a bidirectional jsonrpc2 Stream.
-type Stream interface {
+// A Connection is a bidirectional jsonrpc2 connection.
+type Connection interface {
     Read(ctx context.Context) (JSONRPCMessage, error)
     Write(ctx context.Context, JSONRPCMessage) error
     Close() error
@@ -74,9 +81,9 @@ type Stream interface {
 
 Methods accept a Go `Context` and return an `error`, as is idiomatic for APIs that do I/O.
 
-A `Transport` is something that connects a logical JSON-RPC stream, and nothing more. Streams must be closeable in order to implement client and server shutdown, and therefore conform to the `io.Closer` interface.
+A `Transport` is something that connects a logical JSON-RPC connection, and nothing more. Connections must be closeable in order to implement client and server shutdown, and therefore conform to the `io.Closer` interface.
 
-Other SDKs define higher-level transports, with, for example, methods to send a notification or make a call. Those are jsonrpc2 operations on top of the logical stream, and the lower-level interface is easier to implement in most cases, which means it is easier to implement custom transports.
+Other SDKs define higher-level transports, with, for example, methods to send a notification or make a call. Those are jsonrpc2 operations on top of the logical connection, and the lower-level interface is easier to implement in most cases, which means it is easier to implement custom transports.
 
 For our prototype, we've used an internal `jsonrpc2` package based on the Go language server `gopls`, which we propose to fork for the MCP SDK. It already handles concerns like client/server connection, request lifecycle, cancellation, and shutdown.
 
@@ -88,7 +95,7 @@ The `Transport` interface here is lower-level than that of mcp-go, but serves a 
 
 In the MCP Spec, the **stdio** transport uses newline-delimited JSON to communicate over stdin/stdout. It's possible to model both client side and server side of this communication with a shared type that communicates over an `io.ReadWriteCloser`. However, for the purposes of future-proofing, we should use a different types for client and server stdio transport.
 
-The `CommandTransport` is the client side of the stdio transport, and connects by starting a command and binding its jsonrpc2 stream to its stdin/stdout.
+The `CommandTransport` is the client side of the stdio transport, and connects by starting a command and streaming JSON-RPC messages over stdin/stdout.
 
 ```go
 // A CommandTransport is a [Transport] that runs a command and communicates
@@ -100,7 +107,7 @@ type CommandTransport struct { /* unexported fields */ }
 func NewCommandTransport(cmd *exec.Command) *CommandTransport
 
 // Connect starts the command, and connects to it over stdin/stdout.
-func (*CommandTransport) Connect(ctx context.Context) (Stream, error) {
+func (*CommandTransport) Connect(ctx context.Context) (Connection, error) {
 ```
 
 The `StdIOTransport` is the server side of the stdio transport, and connects by binding to `os.Stdin` and `os.Stdout`.
@@ -112,7 +119,7 @@ type StdIOTransport struct { /* unexported fields */ }
 
 func NewStdIOTransport() *StdIOTransport
 
-func (t *StdIOTransport) Connect(context.Context) (Stream, error)
+func (t *StdIOTransport) Connect(context.Context) (Connection, error)
 ```
 
 #### HTTP transports
@@ -147,7 +154,7 @@ By default, the SSE handler creates messages endpoints with the `?sessionId=...`
 // A SSEServerTransport is a logical SSE session created through a hanging GET
 // request.
 //
-// When connected, it returns the following [Stream] implementation:
+// When connected, it returns the following [Connection] implementation:
 //   - Writes are SSE 'message' events to the GET response.
 //   - Reads are received from POSTs to the session endpoint, via
 //     [SSEServerTransport.ServeHTTP].
@@ -171,8 +178,8 @@ func NewSSEServerTransport(endpoint string, w http.ResponseWriter) *SSEServerTra
 func (*SSEServerTransport) ServeHTTP(w http.ResponseWriter, req *http.Request)
 
 // Connect sends the 'endpoint' event to the client.
-// See [SSEServerTransport] for more details on the [Stream] implementation.
-func (*SSEServerTransport) Connect(context.Context) (Stream, error)
+// See [SSEServerTransport] for more details on the [Connection] implementation.
+func (*SSEServerTransport) Connect(context.Context) (Connection, error)
 ```
 
 The SSE client transport is simpler, and hopefully self-explanatory.
@@ -185,7 +192,7 @@ type SSEClientTransport struct { /* ... */ }
 func NewSSEClientTransport(url string) (*SSEClientTransport, error) {
 
 // Connect connects through the client endpoint.
-func (*SSEClientTransport) Connect(ctx context.Context) (Stream, error)
+func (*SSEClientTransport) Connect(ctx context.Context) (Connection, error)
 ```
 
 The Streamable HTTP transports are similar to the SSE transport, albeit with a
@@ -204,14 +211,14 @@ func (*StreamableHTTPHandler) Close() error
 // that created the session. It is the caller's responsibility to delegate
 // requests to this session.
 type StreamableServerTransport struct { /* ... */ }
-func NewStreamableServerTransport(sessionID string, w http.ResponseWriter) *StreamableServerTransport
+func NewStreamableServerTransport(sessionID string) *StreamableServerTransport
 func (*StreamableServerTransport) ServeHTTP(w http.ResponseWriter, req *http.Request)
-func (*StreamableServerTransport) Connect(context.Context) (Stream, error)
+func (*StreamableServerTransport) Connect(context.Context) (Connection, error)
 
 // The streamable client handles reconnection transparently to the user.
 type StreamableClientTransport struct { /* ... */ }
 func NewStreamableClientTransport(url string) *StreamableClientTransport {
-func (*StreamableClientTransport) Connect(context.Context) (Stream, error)
+func (*StreamableClientTransport) Connect(context.Context) (Connection, error)
 ```
 
 **Differences from mcp-go**: In mcp-go, server authors create an `MCPServer`, populate it with tools, resources and so on, and then wrap it in an `SSEServer` or `StdioServer`. Users can manage their own sessions with `RegisterSession` and `UnregisterSession`. Rather than use a server constructor to get a distinct server for each connection, there is a concept of a "session tool" that overlays tools for a specific session.
@@ -352,7 +359,7 @@ A server that can handle that client call would look like this:
 ```go
 // Create a server with a single tool.
 server := mcp.NewServer("greeter", "v1.0.0", nil)
-server.AddTools(mcp.NewTool("greet", "say hi", SayHi))
+server.AddTools(mcp.NewServerTool("greet", "say hi", SayHi))
 // Run the server over stdin/stdout, until the client disconnects.
 transport := mcp.NewStdIOTransport()
 session, err := server.Connect(ctx, transport)
@@ -581,7 +588,7 @@ type ClientOptions struct {
 
 A `Tool` is a logical MCP tool, generated from the MCP spec, and a `ServerTool` is a tool bound to a tool handler.
 
-A tool handler accepts `CallToolParams` and returns a `CallToolResult`. However, since we want to bind tools to Go input types, it is convenient in associated APIs to make `CallToolParams` generic, with a type parameter `TArgs` for the tool argument type. This allows tool APIs to manage the marshalling and unmarshalling of tool inputs for their caller. The bound `ServerTool` type expects a `json.RawMessage` for its tool arguments, but the `NewTool` constructor described below provides a mechanism to bind a typed handler.
+A tool handler accepts `CallToolParams` and returns a `CallToolResult`. However, since we want to bind tools to Go input types, it is convenient in associated APIs to make `CallToolParams` generic, with a type parameter `TArgs` for the tool argument type. This allows tool APIs to manage the marshalling and unmarshalling of tool inputs for their caller. The bound `ServerTool` type expects a `json.RawMessage` for its tool arguments, but the `NewServerTool` constructor described below provides a mechanism to bind a typed handler.
 
 ```go
 type CallToolParams[TArgs any] struct {
@@ -609,8 +616,8 @@ Add tools to a server with `AddTools`:
 
 ```go
 server.AddTools(
-  mcp.NewTool("add", "add numbers", addHandler),
-  mcp.NewTool("subtract, subtract numbers", subHandler))
+  mcp.NewServerTool("add", "add numbers", addHandler),
+  mcp.NewServerTool("subtract, subtract numbers", subHandler))
 ```
 
 Remove them by name with `RemoveTools`:
@@ -626,16 +633,16 @@ A tool's input schema, expressed as a [JSON Schema](https://json-schema.org), pr
 
 Both of these have their advantages and disadvantages. Reflection is nice, because it allows you to bind directly to a Go API, and means that the JSON schema of your API is compatible with your Go types by construction. It also means that concerns like parsing and validation can be handled automatically. However, it can become cumbersome to express the full breadth of JSON schema using Go types or struct tags, and sometimes you want to express things that aren’t naturally modeled by Go types, like unions. Explicit schemas are simple and readable, and give the caller full control over their tool definition, but involve significant boilerplate.
 
-We have found that a hybrid model works well, where the _initial_ schema is derived using reflection, but any customization on top of that schema is applied using variadic options. We achieve this using a `NewTool` helper, which generates the schema from the input type, and wraps the handler to provide parsing and validation. The schema (and potentially other features) can be customized using ToolOptions.
+We have found that a hybrid model works well, where the _initial_ schema is derived using reflection, but any customization on top of that schema is applied using variadic options. We achieve this using a `NewServerTool` helper, which generates the schema from the input type, and wraps the handler to provide parsing and validation. The schema (and potentially other features) can be customized using ToolOptions.
 
 ```go
-// NewTool creates a Tool using reflection on the given handler.
-func NewTool[TArgs any](name, description string, handler ToolHandler[TArgs], opts …ToolOption) *ServerTool
+// NewServerTool creates a Tool using reflection on the given handler.
+func NewServerTool[TArgs any](name, description string, handler ToolHandler[TArgs], opts …ToolOption) *ServerTool
 
 type ToolOption interface { /* ... */ }
 ```
 
-`NewTool` determines the input schema for a Tool from the `TArgs` type. Each struct field that would be marshaled by `encoding/json.Marshal` becomes a property of the schema. The property is required unless the field's `json` tag specifies "omitempty" or "omitzero" (new in Go 1.24). For example, given this struct:
+`NewServerTool` determines the input schema for a Tool from the `TArgs` type. Each struct field that would be marshaled by `encoding/json.Marshal` becomes a property of the schema. The property is required unless the field's `json` tag specifies "omitempty" or "omitzero" (new in Go 1.24). For example, given this struct:
 
 ```go
 struct {
@@ -661,14 +668,14 @@ type Description(desc string) SchemaOption
 For example:
 
 ```go
-NewTool(name, description, handler,
+NewServerTool(name, description, handler,
     Input(Property("count", Description("size of the inventory"))))
 ```
 
 The most recent JSON Schema spec defines over 40 keywords. Providing them all as options would bloat the API despite the fact that most would be very rarely used. For less common keywords, use the `Schema` option to set the schema explicitly:
 
 ```go
-NewTool(name, description, handler,
+NewServerTool(name, description, handler,
     Input(Property("Choices", Schema(&jsonschema.Schema{UniqueItems: true}))))
 ```
 
@@ -686,7 +693,7 @@ func CallTool[TArgs any](context.Context, *ClientSession, *CallToolParams[TArgs]
 
 **Differences from mcp-go**: using variadic options to configure tools was significantly inspired by mcp-go. However, the distinction between `ToolOption` and `SchemaOption` allows for recursive application of schema options. For example, that limitation is visible in [this code](https://github.com/DCjanus/dida365-mcp-server/blob/master/cmd/mcp/tools.go#L315), which must resort to untyped maps to express a nested schema.
 
-Additionally, the `NewTool` helper provides a means for building a tool from a Go function using reflection, that automatically handles parsing and validation of inputs.
+Additionally, the `NewServerTool` helper provides a means for building a tool from a Go function using reflection, that automatically handles parsing and validation of inputs.
 
 We provide a full JSON Schema implementation for validating tool input schemas against incoming arguments. The `jsonschema.Schema` type provides exported features for all keywords in the JSON Schema draft2020-12 spec. Tool definers can use it to construct any schema they want, so there is no need to provide options for all of them. When combined with schema inference from input structs, we found that we needed only three options to cover the common cases, instead of mcp-go's 23. For example, we will provide `Enum`, which occurs 125 times in open source code, but not MinItems, MinLength or MinProperties, which each occur only once (and in an SDK that wraps mcp-go).
 
@@ -694,10 +701,10 @@ For registering tools, we provide only `AddTools`; mcp-go's `SetTools`, `AddTool
 
 ### Prompts
 
-Use `NewPrompt` to create a prompt. As with tools, prompt argument schemas can be inferred from a struct, or obtained from options.
+Use `NewServerPrompt` to create a prompt. As with tools, prompt argument schemas can be inferred from a struct, or obtained from options.
 
 ```go
-func NewPrompt[TReq any](name, description string,
+func NewServerPrompt[TReq any](name, description string,
   handler func(context.Context, *ServerSession, TReq) (*GetPromptResult, error),
   opts ...PromptOption) *ServerPrompt
 ```
@@ -713,7 +720,7 @@ type codeReviewArgs struct {
 func codeReviewHandler(context.Context, *ServerSession, codeReviewArgs) {...}
 
 server.AddPrompts(
-  NewPrompt("code_review", "review code", codeReviewHandler,
+  NewServerPrompt("code_review", "review code", codeReviewHandler,
     Argument("code", Description("the code to review"))))
 
 server.RemovePrompts("code_review")
@@ -721,7 +728,7 @@ server.RemovePrompts("code_review")
 
 Client sessions can call the spec method `ListPrompts` or the iterator method `Prompts` to list the available prompts, and the spec method `GetPrompt` to get one.
 
-**Differences from mcp-go**: We provide a `NewPrompt` helper to bind a prompt handler to a Go function using reflection to derive its arguments. We provide `RemovePrompts` to remove prompts from the server.
+**Differences from mcp-go**: We provide a `NewServerPrompt` helper to bind a prompt handler to a Go function using reflection to derive its arguments. We provide `RemovePrompts` to remove prompts from the server.
 
 ### Resources and resource templates
 
