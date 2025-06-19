@@ -111,7 +111,7 @@ func NewSSEHandler(getServer func(request *http.Request) *Server) *SSEHandler {
 //   - Close terminates the hanging GET.
 type SSEServerTransport struct {
 	endpoint string
-	incoming chan jsonrpc2.Message // queue of incoming messages; never closed
+	incoming chan JSONRPCMessage // queue of incoming messages; never closed
 
 	// We must guard both pushes to the incoming queue and writes to the response
 	// writer, because incoming POST requests are arbitrarily concurrent and we
@@ -138,7 +138,7 @@ func NewSSEServerTransport(endpoint string, w http.ResponseWriter) *SSEServerTra
 	return &SSEServerTransport{
 		endpoint: endpoint,
 		w:        w,
-		incoming: make(chan jsonrpc2.Message, 100),
+		incoming: make(chan JSONRPCMessage, 100),
 		done:     make(chan struct{}),
 	}
 }
@@ -264,7 +264,7 @@ type sseServerConn struct {
 }
 
 // Read implements jsonrpc2.Reader.
-func (s sseServerConn) Read(ctx context.Context) (jsonrpc2.Message, error) {
+func (s sseServerConn) Read(ctx context.Context) (JSONRPCMessage, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -276,7 +276,7 @@ func (s sseServerConn) Read(ctx context.Context) (jsonrpc2.Message, error) {
 }
 
 // Write implements jsonrpc2.Writer.
-func (s sseServerConn) Write(ctx context.Context, msg jsonrpc2.Message) error {
+func (s sseServerConn) Write(ctx context.Context, msg JSONRPCMessage) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -322,20 +322,33 @@ func (s sseServerConn) Close() error {
 // https://modelcontextprotocol.io/specification/2024-11-05/basic/transports
 type SSEClientTransport struct {
 	sseEndpoint *url.URL
+	opts        SSEClientTransportOptions
+}
+
+// SSEClientTransportOptions provides options for the [NewSSEClientTransport]
+// constructor.
+type SSEClientTransportOptions struct {
+	// HTTPClient is the client to use for making HTTP requests. If nil,
+	// http.DefaultClient is used.
+	HTTPClient *http.Client
 }
 
 // NewSSEClientTransport returns a new client transport that connects to the
 // SSE server at the provided URL.
 //
 // NewSSEClientTransport panics if the given URL is invalid.
-func NewSSEClientTransport(baseURL string) *SSEClientTransport {
+func NewSSEClientTransport(baseURL string, opts *SSEClientTransportOptions) *SSEClientTransport {
 	url, err := url.Parse(baseURL)
 	if err != nil {
 		panic(fmt.Sprintf("invalid base url: %v", err))
 	}
-	return &SSEClientTransport{
+	t := &SSEClientTransport{
 		sseEndpoint: url,
 	}
+	if opts != nil {
+		t.opts = *opts
+	}
+	return t
 }
 
 // Connect connects through the client endpoint.
@@ -344,8 +357,12 @@ func (c *SSEClientTransport) Connect(ctx context.Context) (Connection, error) {
 	if err != nil {
 		return nil, err
 	}
+	httpClient := c.opts.HTTPClient
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
 	req.Header.Set("Accept", "text/event-stream")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -507,7 +524,7 @@ func (c *sseClientConn) isDone() bool {
 	return c.closed
 }
 
-func (c *sseClientConn) Read(ctx context.Context) (jsonrpc2.Message, error) {
+func (c *sseClientConn) Read(ctx context.Context) (JSONRPCMessage, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -528,7 +545,7 @@ func (c *sseClientConn) Read(ctx context.Context) (jsonrpc2.Message, error) {
 	}
 }
 
-func (c *sseClientConn) Write(ctx context.Context, msg jsonrpc2.Message) error {
+func (c *sseClientConn) Write(ctx context.Context, msg JSONRPCMessage) error {
 	data, err := jsonrpc2.EncodeMessage(msg)
 	if err != nil {
 		return err
