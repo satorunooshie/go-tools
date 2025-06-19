@@ -151,7 +151,7 @@ func (h *StreamableHTTPHandler) ServeHTTP(w http.ResponseWriter, req *http.Reque
 func NewStreamableServerTransport(sessionID string) *StreamableServerTransport {
 	return &StreamableServerTransport{
 		id:               sessionID,
-		incoming:         make(chan jsonrpc2.Message, 10),
+		incoming:         make(chan JSONRPCMessage, 10),
 		done:             make(chan struct{}),
 		outgoingMessages: make(map[streamID][]*streamableMsg),
 		signals:          make(map[streamID]chan struct{}),
@@ -166,7 +166,7 @@ type StreamableServerTransport struct {
 	nextStreamID atomic.Int64 // incrementing next stream ID
 
 	id       string
-	incoming chan jsonrpc2.Message // messages from the client to the server
+	incoming chan JSONRPCMessage // messages from the client to the server
 
 	mu sync.Mutex
 
@@ -466,7 +466,7 @@ func parseEventID(eventID string) (conn streamID, idx int, ok bool) {
 }
 
 // Read implements the [Connection] interface.
-func (t *StreamableServerTransport) Read(ctx context.Context) (jsonrpc2.Message, error) {
+func (t *StreamableServerTransport) Read(ctx context.Context) (JSONRPCMessage, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -571,13 +571,26 @@ func (t *StreamableServerTransport) Close() error {
 //
 // TODO(rfindley): support retries and resumption tokens.
 type StreamableClientTransport struct {
-	url string
+	url  string
+	opts StreamableClientTransportOptions
+}
+
+// StreamableClientTransportOptions provides options for the
+// [NewStreamableClientTransport] constructor.
+type StreamableClientTransportOptions struct {
+	// HTTPClient is the client to use for making HTTP requests. If nil,
+	// http.DefaultClient is used.
+	HTTPClient *http.Client
 }
 
 // NewStreamableClientTransport returns a new client transport that connects to
 // the streamable HTTP server at the provided URL.
-func NewStreamableClientTransport(url string) *StreamableClientTransport {
-	return &StreamableClientTransport{url: url}
+func NewStreamableClientTransport(url string, opts *StreamableClientTransportOptions) *StreamableClientTransport {
+	t := &StreamableClientTransport{url: url}
+	if opts != nil {
+		t.opts = *opts
+	}
+	return t
 }
 
 // Connect implements the [Transport] interface.
@@ -589,9 +602,13 @@ func NewStreamableClientTransport(url string) *StreamableClientTransport {
 // When closed, the connection issues a DELETE request to terminate the logical
 // session.
 func (t *StreamableClientTransport) Connect(ctx context.Context) (Connection, error) {
+	client := t.opts.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
 	return &streamableClientConn{
 		url:      t.url,
-		client:   http.DefaultClient,
+		client:   client,
 		incoming: make(chan []byte, 100),
 		done:     make(chan struct{}),
 	}, nil
@@ -613,7 +630,7 @@ type streamableClientConn struct {
 }
 
 // Read implements the [Connection] interface.
-func (s *streamableClientConn) Read(ctx context.Context) (jsonrpc2.Message, error) {
+func (s *streamableClientConn) Read(ctx context.Context) (JSONRPCMessage, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -625,7 +642,7 @@ func (s *streamableClientConn) Read(ctx context.Context) (jsonrpc2.Message, erro
 }
 
 // Write implements the [Connection] interface.
-func (s *streamableClientConn) Write(ctx context.Context, msg jsonrpc2.Message) error {
+func (s *streamableClientConn) Write(ctx context.Context, msg JSONRPCMessage) error {
 	s.mu.Lock()
 	if s.err != nil {
 		s.mu.Unlock()
