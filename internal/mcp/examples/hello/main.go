@@ -32,11 +32,11 @@ func SayHi(ctx context.Context, ss *mcp.ServerSession, params *mcp.CallToolParam
 
 // TODO(jba): it should be OK for args to be a pointer, but this fails in
 // jsonschema. Needs investigation.
-func PromptHi(ctx context.Context, ss *mcp.ServerSession, args HiArgs, _ *mcp.GetPromptParams) (*mcp.GetPromptResult, error) {
+func PromptHi(ctx context.Context, ss *mcp.ServerSession, params *mcp.GetPromptParams) (*mcp.GetPromptResult, error) {
 	return &mcp.GetPromptResult{
 		Description: "Code review prompt",
 		Messages: []*mcp.PromptMessage{
-			{Role: "user", Content: mcp.NewTextContent("Say hi to " + args.Name)},
+			{Role: "user", Content: mcp.NewTextContent("Say hi to " + params.Arguments["name"])},
 		},
 	}, nil
 }
@@ -48,7 +48,10 @@ func main() {
 	server.AddTools(mcp.NewServerTool("greet", "say hi", SayHi, mcp.Input(
 		mcp.Property("name", mcp.Description("the name to say hi to")),
 	)))
-	server.AddPrompts(mcp.NewServerPrompt("greet", "", PromptHi))
+	server.AddPrompts(&mcp.ServerPrompt{
+		Prompt:  &mcp.Prompt{Name: "greet"},
+		Handler: PromptHi,
+	})
 	server.AddResources(&mcp.ServerResource{
 		Resource: &mcp.Resource{
 			Name:     "info",
@@ -65,7 +68,7 @@ func main() {
 		log.Printf("MCP handler listening at %s", *httpAddr)
 		http.ListenAndServe(*httpAddr, handler)
 	} else {
-		t := mcp.NewLoggingTransport(mcp.NewStdIOTransport(), os.Stderr)
+		t := mcp.NewLoggingTransport(mcp.NewStdioTransport(), os.Stderr)
 		if err := server.Run(context.Background(), t); err != nil {
 			log.Printf("Server failed: %v", err)
 		}
