@@ -23,15 +23,27 @@ import (
 	"golang.org/x/tools/gopls/internal/golang"
 	"golang.org/x/tools/gopls/internal/protocol"
 	"golang.org/x/tools/gopls/internal/util/astutil"
+	"golang.org/x/tools/internal/analysisinternal"
 	"golang.org/x/tools/internal/mcp"
 )
 
 type ContextParams struct {
-	Location protocol.Location `json:"location"`
+	File string `json:"file"`
 }
 
-func contextHandler(ctx context.Context, session *cache.Session, params *mcp.CallToolParamsFor[ContextParams]) (*mcp.CallToolResultFor[struct{}], error) {
-	fh, snapshot, release, err := session.FileOf(ctx, params.Arguments.Location.URI)
+func (h *handler) contextTool() *mcp.ServerTool {
+	return mcp.NewServerTool(
+		"go_context",
+		"Provide context for a region within a Go file",
+		h.contextHandler,
+		mcp.Input(
+			mcp.Property("file", mcp.Description("the absolute path to the file")),
+		),
+	)
+}
+
+func (h *handler) contextHandler(ctx context.Context, _ *mcp.ServerSession, params *mcp.CallToolParamsFor[ContextParams]) (*mcp.CallToolResultFor[any], error) {
+	fh, snapshot, release, err := h.fileOf(ctx, params.Arguments.File)
 	if err != nil {
 		return nil, err
 	}
@@ -42,25 +54,22 @@ func contextHandler(ctx context.Context, session *cache.Session, params *mcp.Cal
 		return nil, fmt.Errorf("can't provide context for non-Go file")
 	}
 
-	pkg, pgf, err := golang.NarrowestPackageForFile(ctx, snapshot, params.Arguments.Location.URI)
+	pkg, pgf, err := golang.NarrowestPackageForFile(ctx, snapshot, fh.URI())
 	if err != nil {
 		return nil, err
 	}
 
 	var result strings.Builder
-	result.WriteString("Code blocks are delimited by --->...<--- markers.\n\n")
 
-	// TODO(hxjiang): add context based on location's range.
-
-	fmt.Fprintf(&result, "Current package %q (package %s) declares the following symbols:\n\n", pkg.Metadata().PkgPath, pkg.Metadata().Name)
+	fmt.Fprintf(&result, "Current package %q (package %s):\n\n", pkg.Metadata().PkgPath, pkg.Metadata().Name)
 	// Write context of the current file.
 	{
 		fmt.Fprintf(&result, "%s (current file):\n", pgf.URI.Base())
-		result.WriteString("--->\n")
+		result.WriteString("```go\n")
 		if err := writeFileSummary(ctx, snapshot, pgf.URI, &result, false); err != nil {
 			return nil, err
 		}
-		result.WriteString("<---\n\n")
+		result.WriteString("```\n\n")
 	}
 
 	// Write context of the rest of the files in the current package.
@@ -71,11 +80,11 @@ func contextHandler(ctx context.Context, session *cache.Session, params *mcp.Cal
 			}
 
 			fmt.Fprintf(&result, "%s:\n", file.URI.Base())
-			result.WriteString("--->\n")
+			result.WriteString("```go\n")
 			if err := writeFileSummary(ctx, snapshot, file.URI, &result, false); err != nil {
 				return nil, err
 			}
-			result.WriteString("<---\n\n")
+			result.WriteString("```\n\n")
 		}
 	}
 
@@ -104,42 +113,52 @@ func contextHandler(ctx context.Context, session *cache.Session, params *mcp.Cal
 			result.WriteString("<---\n\n")
 		}
 
+		var toSummarize []*ast.ImportSpec
+		for _, spec := range pgf.File.Imports {
+			// Skip the standard library to reduce token usage, operating on
+			// the assumption that the LLM is already familiar with its
+			// symbols and documentation.
+			if analysisinternal.IsStdPackage(spec.Path.Value) {
+				continue
+			}
+			toSummarize = append(toSummarize, spec)
+		}
+
 		// Write summaries from imported packages.
-		{
+		if len(toSummarize) > 0 {
 			result.WriteString("The imported packages declare the following symbols:\n\n")
-			for _, imp := range pgf.File.Imports {
-				importPath := metadata.UnquoteImportPath(imp)
-				if importPath == "" {
-					continue
-				}
-
-				impID := pkg.Metadata().DepsByImpPath[importPath]
-				if impID == "" {
+			for _, spec := range toSummarize {
+				path := metadata.UnquoteImportPath(spec)
+				id := pkg.Metadata().DepsByImpPath[path]
+				if id == "" {
 					continue // ignore error
 				}
-				impMetadata := snapshot.Metadata(impID)
-				if impMetadata == nil {
+				md := snapshot.Metadata(id)
+				if md == nil {
 					continue // ignore error
 				}
-
-				fmt.Fprintf(&result, "%q (package %s)\n", importPath, impMetadata.Name)
-				for _, f := range impMetadata.CompiledGoFiles {
-					fmt.Fprintf(&result, "%s:\n", f.Base())
-					result.WriteString("--->\n")
-					if err := writeFileSummary(ctx, snapshot, f, &result, true); err != nil {
-						return nil, err
-					}
-					result.WriteString("<---\n\n")
+				if summary := summarizePackage(ctx, snapshot, path, md); summary != "" {
+					result.WriteString(summary)
 				}
 			}
 		}
 	}
 
-	return &mcp.CallToolResultFor[struct{}]{
-		Content: []*mcp.Content{
-			mcp.NewTextContent(result.String()),
-		},
-	}, nil
+	return textResult(result.String()), nil
+}
+
+func summarizePackage(ctx context.Context, snapshot *cache.Snapshot, path metadata.ImportPath, md *metadata.Package) string {
+	var buf strings.Builder
+	fmt.Fprintf(&buf, "%q (package %s)\n", path, md.Name)
+	for _, f := range md.CompiledGoFiles {
+		fmt.Fprintf(&buf, "%s:\n", f.Base())
+		buf.WriteString("--->\n")
+		if err := writeFileSummary(ctx, snapshot, f, &buf, true); err != nil {
+			return "" // ignore error
+		}
+		buf.WriteString("<---\n\n")
+	}
+	return buf.String()
 }
 
 // writeFileSummary writes the file summary to the string builder based on
