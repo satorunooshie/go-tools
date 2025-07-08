@@ -1,4 +1,6 @@
-# Gopls: Support for Go *.s assembly files
+---
+title: "Gopls: Support for Go *.s assembly files"
+---
 
 Gopls has rudimentary support for LSP operations in Go assembly files.
 
@@ -25,5 +27,5 @@ GOROOT/src/runtime/signal_unix.go:
 func sigpanic() {
 ```
 
-See also issue golang/go#71754, which tracks the development of LSP
+See also issue https://go.dev/issue/71754, which tracks the development of LSP
 features in Go assembly files.

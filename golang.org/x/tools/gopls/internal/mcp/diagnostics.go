@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -22,12 +23,23 @@ import (
 	"golang.org/x/tools/internal/mcp"
 )
 
-type DiagnosticsParams struct {
-	Location protocol.Location `json:"location"`
+type diagnosticsParams struct {
+	File string `json:"file"`
 }
 
-func diagnosticsHandler(ctx context.Context, session *cache.Session, server protocol.Server, params *mcp.CallToolParamsFor[DiagnosticsParams]) (*mcp.CallToolResultFor[struct{}], error) {
-	fh, snapshot, release, err := session.FileOf(ctx, params.Arguments.Location.URI)
+func (h *handler) diagnosticsTool() *mcp.ServerTool {
+	return mcp.NewServerTool(
+		"go_diagnostics",
+		"Provides diagnostics for a Go file",
+		h.diagnoseFileHandler,
+		mcp.Input(
+			mcp.Property("file", mcp.Description("the absolute path to the file to diagnose")),
+		),
+	)
+}
+
+func (h *handler) diagnoseFileHandler(ctx context.Context, _ *mcp.ServerSession, params *mcp.CallToolParamsFor[diagnosticsParams]) (*mcp.CallToolResultFor[any], error) {
+	fh, snapshot, release, err := h.fileOf(ctx, params.Arguments.File)
 	if err != nil {
 		return nil, err
 	}
@@ -48,7 +60,7 @@ func diagnosticsHandler(ctx context.Context, session *cache.Session, server prot
 		// Ignore errors. It is still valuable to provide only the diagnostic
 		// without any text edits.
 		// TODO(hxjiang): support code actions that returns call back command.
-		actions, _ := server.CodeAction(ctx, &protocol.CodeActionParams{
+		actions, _ := h.lspServer.CodeAction(ctx, &protocol.CodeActionParams{
 			TextDocument: protocol.TextDocumentIdentifier{
 				URI: fh.URI(),
 			},
@@ -64,7 +76,6 @@ func diagnosticsHandler(ctx context.Context, session *cache.Session, server prot
 		}
 
 		fixes := make(map[key]*protocol.CodeAction)
-
 		for _, action := range actions {
 			for _, d := range action.Diagnostics {
 				k := key{d.Message, d.Range}
@@ -74,27 +85,35 @@ func diagnosticsHandler(ctx context.Context, session *cache.Session, server prot
 			}
 		}
 
+		fixesByDiagnostic := make(map[*cache.Diagnostic]*protocol.CodeAction)
 		for _, d := range diagnostics {
-			fmt.Fprintf(&builder, "%d:%d-%d:%d: [%s] %s\n", d.Range.Start.Line, d.Range.Start.Character, d.Range.End.Line, d.Range.End.Character, d.Severity, d.Message)
-
-			fix, ok := fixes[key{d.Message, d.Range}]
-			if ok {
-				diff, err := toUnifiedDiff(ctx, snapshot, fix.Edit.DocumentChanges)
-				if err != nil {
-					return nil, err
-				}
-
-				fmt.Fprintf(&builder, "Fix:\n%s\n", diff)
+			if fix, ok := fixes[key{d.Message, d.Range}]; ok {
+				fixesByDiagnostic[d] = fix
 			}
-			builder.WriteString("\n")
+		}
+		if err := summarizeDiagnostics(ctx, snapshot, &builder, diagnostics, fixesByDiagnostic); err != nil {
+			return nil, err
 		}
 	}
 
-	return &mcp.CallToolResultFor[struct{}]{
-		Content: []*mcp.Content{
-			mcp.NewTextContent(builder.String()),
-		},
-	}, nil
+	return textResult(builder.String()), nil
+}
+
+func summarizeDiagnostics(ctx context.Context, snapshot *cache.Snapshot, w io.Writer, diagnostics []*cache.Diagnostic, fixes map[*cache.Diagnostic]*protocol.CodeAction) error {
+	for _, d := range diagnostics {
+		fmt.Fprintf(w, "%d:%d-%d:%d: [%s] %s\n", d.Range.Start.Line, d.Range.Start.Character, d.Range.End.Line, d.Range.End.Character, d.Severity, d.Message)
+
+		fix, ok := fixes[d]
+		if ok {
+			diff, err := toUnifiedDiff(ctx, snapshot, fix.Edit.DocumentChanges)
+			if err != nil {
+				return err
+			}
+
+			fmt.Fprintf(w, "Fix:\n%s\n", diff)
+		}
+	}
+	return nil
 }
 
 // toUnifiedDiff converts each [protocol.DocumentChange] into a separate
