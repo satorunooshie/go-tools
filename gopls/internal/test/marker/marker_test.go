@@ -194,7 +194,7 @@ func Test(t *testing.T) {
 				diags:      make(map[protocol.Location][]protocol.Diagnostic),
 				extraNotes: make(map[protocol.DocumentURI]map[string][]*expect.Note),
 			}
-			defer run.env.Close()
+			defer run.env.ClosePartially_Issue74166()
 
 			// Support built-in pseudo-locations here.
 			// fmtLoc coerces "got" Locations to these forms
@@ -2475,14 +2475,27 @@ func mcpToolMarker(mark marker, tool string, rawArgs string) {
 		return
 	}
 
+	// substitutePaths replaces instances of $WORKDIR in string or []string values with
+	// the actual working directory.
+	var substitutePaths func(any) any
+	substitutePaths = func(v any) any {
+		switch v := v.(type) {
+		case string:
+			return strings.ReplaceAll(v, "$WORKDIR", mark.run.env.Sandbox.Workdir.RootURI().Path())
+
+		case []any:
+			for i, e := range v {
+				if _, ok := e.(string); ok {
+					v[i] = substitutePaths(e).(string)
+				}
+			}
+		}
+		return v
+	}
 	// Hack: replace '$WORKDIR' in string arguments with the actual sandbox
 	// working directory.
 	for k, v := range args {
-		if s, ok := v.(string); ok {
-			if s2 := strings.ReplaceAll(s, "$WORKDIR", mark.run.env.Sandbox.Workdir.RootURI().Path()); s2 != s {
-				args[k] = s2
-			}
-		}
+		args[k] = substitutePaths(v)
 	}
 
 	if loc := namedArg(mark, "location", protocol.Location{}); loc != (protocol.Location{}) {

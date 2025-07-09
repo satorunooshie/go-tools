@@ -25,13 +25,13 @@ import (
 	"golang.org/x/tools/gopls/internal/protocol"
 	"golang.org/x/tools/gopls/internal/settings"
 	"golang.org/x/tools/gopls/internal/util/bug"
+	"golang.org/x/tools/gopls/internal/util/memoize"
 	"golang.org/x/tools/gopls/internal/util/persistent"
 	"golang.org/x/tools/gopls/internal/vulncheck"
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/event/keys"
 	"golang.org/x/tools/internal/gocommand"
 	"golang.org/x/tools/internal/imports"
-	"golang.org/x/tools/internal/memoize"
 	"golang.org/x/tools/internal/xcontext"
 )
 
@@ -436,8 +436,8 @@ func (s *Session) SnapshotOf(ctx context.Context, uri protocol.DocumentURI) (*Sn
 		//
 		// Any view can load a command-line-arguments package; aggregate those into
 		// views[0] below.
-		for _, id := range g.IDs[uri] {
-			if !metadata.IsCommandLineArguments(id) || g.Packages[id].Standalone {
+		for _, pkg := range g.ForFile[uri] {
+			if !metadata.IsCommandLineArguments(pkg.ID) || pkg.Standalone {
 				return snapshot, release, nil
 			}
 		}
