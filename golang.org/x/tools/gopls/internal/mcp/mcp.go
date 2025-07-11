@@ -25,7 +25,7 @@ import (
 )
 
 //go:embed instructions.md
-var instructions string
+var Instructions string
 
 // A handler implements various MCP tools for an LSP session.
 type handler struct {
@@ -156,18 +156,20 @@ func newServer(session *cache.Session, lspServer protocol.Server) *mcp.Server {
 		lspServer: lspServer,
 	}
 	mcpServer := mcp.NewServer("gopls", "v0.1.0", &mcp.ServerOptions{
-		Instructions: instructions,
+		Instructions: Instructions,
 	})
 
 	defaultTools := []*mcp.ServerTool{
 		h.workspaceTool(),
-		h.fileMetadataTool(),
 		h.outlineTool(),
 		h.workspaceDiagnosticsTool(),
 		h.symbolReferencesTool(),
 		h.searchTool(),
+		h.fileContextTool(),
 	}
 	disabledTools := append(defaultTools,
+		// The fileMetadata tool is redundant with fileContext.
+		h.fileMetadataTool(),
 		// The context tool returns context for all imports, which can consume a
 		// lot of tokens. Conservatively, rely on the model selecting the imports
 		// to summarize using the outline tool.
