@@ -2,7 +2,7 @@
 all: gopls cmd
 
 .PHONY: gopls
-install:
+gopls:
 	cd golang.org/x/tools/gopls; go install
 
 .PHONY: cmd
