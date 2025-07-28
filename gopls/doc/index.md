@@ -26,6 +26,9 @@ by editor, so we recommend that you proceed to the
 Also, the gopls documentation for each feature describes whether it is
 supported in each client editor.
 
+This documentation (https://go.dev/gopls) describes the most recent release of gopls.
+To preview documentation for the release under development, visit https://tip.golang.org/gopls.
+
 ## Features
 
 Gopls supports a wide range of standard LSP features for navigation,
@@ -72,7 +75,7 @@ observe the effect. Each client has its own way to restart the server.
 Learn more in the
 [advanced installation instructions](advanced.md#installing-unreleased-versions).
 
-## Release policy
+## Releases
 
 Gopls [releases](release/) follow [semantic versioning](http://semver.org), with
 major changes and new features introduced only in new minor versions
@@ -117,7 +120,7 @@ full list of `gopls` settings can be found in the [settings documentation](setti
 variables you configure. Some editors, such as VS Code, allow users to
 selectively override the values of some environment variables.
 
-## Support Policy
+## Support policy
 
 Gopls is maintained by engineers on the
 [Go tools team](https://github.com/orgs/golang/teams/tools-team/members),
