@@ -2870,7 +2870,7 @@ The any analyzer suggests replacing uses of the empty interface type, \`interfac
 
 Default: on.
 
-Package documentation: [any](https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/modernize#any)
+Package documentation: [any](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/modernize#any)
 
 <a id='appendclipped'></a>
 ## `appendclipped`: simplify append chains using slices.Concat
@@ -2886,7 +2886,7 @@ This analyzer is currently disabled by default as the transformation does not pr
 
 Default: off. Enable by setting `"analyses": {"appendclipped": true}`.
 
-Package documentation: [appendclipped](https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/modernize#appendclipped)
+Package documentation: [appendclipped](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/modernize#appendclipped)
 
 <a id='appends'></a>
 ## `appends`: check for missing values after append
@@ -2957,7 +2957,7 @@ Caveats: The b.Loop() method is designed to prevent the compiler from optimizing
 
 Default: on.
 
-Package documentation: [bloop](https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/modernize#bloop)
+Package documentation: [bloop](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/modernize#bloop)
 
 <a id='bools'></a>
 ## `bools`: check for common mistakes involving boolean operators
@@ -3129,7 +3129,7 @@ The fmtappendf analyzer suggests replacing \`\[]byte(fmt.Sprintf(...))\` with \`
 
 Default: on.
 
-Package documentation: [fmtappendf](https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/modernize#fmtappendf)
+Package documentation: [fmtappendf](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/modernize#fmtappendf)
 
 <a id='forvar'></a>
 ## `forvar`: remove redundant re-declaration of loop variables
@@ -3141,7 +3141,7 @@ This fix only applies to \`range\` loops.
 
 Default: on.
 
-Package documentation: [forvar](https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/modernize#forvar)
+Package documentation: [forvar](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/modernize#forvar)
 
 <a id='framepointer'></a>
 ## `framepointer`: report assembly that clobbers the frame pointer before saving it
@@ -3151,87 +3151,6 @@ Package documentation: [forvar](https://pkg.go.dev/golang.org/x/tools/gopls/inte
 Default: on.
 
 Package documentation: [framepointer](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/framepointer)
-
-<a id='gofix'></a>
-## `gofix`: apply fixes based on go:fix comment directives
-
-The gofix analyzer inlines functions and constants that are marked for inlining.
-
-\## Functions
-
-Given a function that is marked for inlining, like this one:
-
-	//go:fix inline
-	func Square(x int) int { return Pow(x, 2) }
-
-this analyzer will recommend that calls to the function elsewhere, in the same or other packages, should be inlined.
-
-Inlining can be used to move off of a deprecated function:
-
-	// Deprecated: prefer Pow(x, 2).
-	//go:fix inline
-	func Square(x int) int { return Pow(x, 2) }
-
-It can also be used to move off of an obsolete package, as when the import path has changed or a higher major version is available:
-
-	package pkg
-
-	import pkg2 "pkg/v2"
-
-	//go:fix inline
-	func F() { pkg2.F(nil) }
-
-Replacing a call pkg.F() by pkg2.F(nil) can have no effect on the program, so this mechanism provides a low-risk way to update large numbers of calls. We recommend, where possible, expressing the old API in terms of the new one to enable automatic migration.
-
-The inliner takes care to avoid behavior changes, even subtle ones, such as changes to the order in which argument expressions are evaluated. When it cannot safely eliminate all parameter variables, it may introduce a "binding declaration" of the form
-
-	var params = args
-
-to evaluate argument expressions in the correct order and bind them to parameter variables. Since the resulting code transformation may be stylistically suboptimal, such inlinings may be disabled by specifying the -gofix.allow\_binding\_decl=false flag to the analyzer driver.
-
-(In cases where it is not safe to "reduce" a call—that is, to replace a call f(x) by the body of function f, suitably substituted—the inliner machinery is capable of replacing f by a function literal, func(){...}(). However, the gofix analyzer discards all such "literalizations" unconditionally, again on grounds of style.)
-
-\## Constants
-
-Given a constant that is marked for inlining, like this one:
-
-	//go:fix inline
-	const Ptr = Pointer
-
-this analyzer will recommend that uses of Ptr should be replaced with Pointer.
-
-As with functions, inlining can be used to replace deprecated constants and constants in obsolete packages.
-
-A constant definition can be marked for inlining only if it refers to another named constant.
-
-The "//go:fix inline" comment must appear before a single const declaration on its own, as above; before a const declaration that is part of a group, as in this case:
-
-	const (
-	   C = 1
-	   //go:fix inline
-	   Ptr = Pointer
-	)
-
-or before a group, applying to every constant in the group:
-
-	//go:fix inline
-	const (
-		Ptr = Pointer
-	    Val = Value
-	)
-
-The proposal [https://go.dev/issue/32816](https://go.dev/issue/32816) introduces the "//go:fix" directives.
-
-You can use this (officially unsupported) command to apply gofix fixes en masse:
-
-	$ go run golang.org/x/tools/internal/gofix/cmd/gofix@latest -test ./...
-
-(Do not use "go get -tool" to add gopls as a dependency of your module; gopls commands must be built from their release branch.)
-
-
-Default: on.
-
-Package documentation: [gofix](https://pkg.go.dev/golang.org/x/tools/internal/gofix)
 
 <a id='hostport'></a>
 ## `hostport`: check format of addresses passed to net.Dial
@@ -3306,6 +3225,85 @@ Explicit type arguments may be omitted from call expressions if they can be infe
 Default: on.
 
 Package documentation: [infertypeargs](https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/infertypeargs)
+
+<a id='inline'></a>
+## `inline`: apply fixes based on 'go:fix inline' comment directives
+
+The inline analyzer inlines functions and constants that are marked for inlining.
+
+\## Functions
+
+Given a function that is marked for inlining, like this one:
+
+	//go:fix inline
+	func Square(x int) int { return Pow(x, 2) }
+
+this analyzer will recommend that calls to the function elsewhere, in the same or other packages, should be inlined.
+
+Inlining can be used to move off of a deprecated function:
+
+	// Deprecated: prefer Pow(x, 2).
+	//go:fix inline
+	func Square(x int) int { return Pow(x, 2) }
+
+It can also be used to move off of an obsolete package, as when the import path has changed or a higher major version is available:
+
+	package pkg
+
+	import pkg2 "pkg/v2"
+
+	//go:fix inline
+	func F() { pkg2.F(nil) }
+
+Replacing a call pkg.F() by pkg2.F(nil) can have no effect on the program, so this mechanism provides a low-risk way to update large numbers of calls. We recommend, where possible, expressing the old API in terms of the new one to enable automatic migration.
+
+The inliner takes care to avoid behavior changes, even subtle ones, such as changes to the order in which argument expressions are evaluated. When it cannot safely eliminate all parameter variables, it may introduce a "binding declaration" of the form
+
+	var params = args
+
+to evaluate argument expressions in the correct order and bind them to parameter variables. Since the resulting code transformation may be stylistically suboptimal, such inlinings may be disabled by specifying the -inline.allow\_binding\_decl=false flag to the analyzer driver.
+
+(In cases where it is not safe to "reduce" a call—that is, to replace a call f(x) by the body of function f, suitably substituted—the inliner machinery is capable of replacing f by a function literal, func(){...}(). However, the inline analyzer discards all such "literalizations" unconditionally, again on grounds of style.)
+
+\## Constants
+
+Given a constant that is marked for inlining, like this one:
+
+	//go:fix inline
+	const Ptr = Pointer
+
+this analyzer will recommend that uses of Ptr should be replaced with Pointer.
+
+As with functions, inlining can be used to replace deprecated constants and constants in obsolete packages.
+
+A constant definition can be marked for inlining only if it refers to another named constant.
+
+The "//go:fix inline" comment must appear before a single const declaration on its own, as above; before a const declaration that is part of a group, as in this case:
+
+	const (
+	   C = 1
+	   //go:fix inline
+	   Ptr = Pointer
+	)
+
+or before a group, applying to every constant in the group:
+
+	//go:fix inline
+	const (
+		Ptr = Pointer
+	    Val = Value
+	)
+
+The proposal [https://go.dev/issue/32816](https://go.dev/issue/32816) introduces the "//go:fix inline" directives.
+
+You can use this command to apply inline fixes en masse:
+
+	$ go run golang.org/x/tools/go/analysis/passes/inline/cmd/inline@latest -test ./...
+
+
+Default: on.
+
+Package documentation: [inline](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/inline)
 
 <a id='loopclosure'></a>
 ## `loopclosure`: check references to loop variables from within nested functions
@@ -3419,7 +3417,7 @@ The transformation to \`maps.Clone\` is applied conservatively, as it preserves 
 
 Default: on.
 
-Package documentation: [mapsloop](https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/modernize#mapsloop)
+Package documentation: [mapsloop](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/modernize#mapsloop)
 
 <a id='minmax'></a>
 ## `minmax`: replace if/else statements with calls to min or max
@@ -3437,7 +3435,7 @@ This analyzer avoids making suggestions for floating-point types, as the behavio
 
 Default: on.
 
-Package documentation: [minmax](https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/modernize#minmax)
+Package documentation: [minmax](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/modernize#minmax)
 
 <a id='nilfunc'></a>
 ## `nilfunc`: check for useless comparisons between functions and nil
@@ -3553,7 +3551,7 @@ Replacing \`omitempty\` with \`omitzero\` is a change in behavior. The original 
 
 Default: on.
 
-Package documentation: [omitzero](https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/modernize#omitzero)
+Package documentation: [omitzero](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/modernize#omitzero)
 
 <a id='printf'></a>
 ## `printf`: check consistency of Printf format strings and arguments
@@ -3583,7 +3581,7 @@ This transformation is applied only if (a) the loop variable is not modified wit
 
 Default: on.
 
-Package documentation: [rangeint](https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/modernize#rangeint)
+Package documentation: [rangeint](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/modernize#rangeint)
 
 <a id='recursiveiter'></a>
 ## `recursiveiter`: check for inefficient recursive iterators
@@ -3680,7 +3678,7 @@ or when the operand has potential side effects.
 
 Default: on.
 
-Package documentation: [reflecttypefor](https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/modernize#reflecttypefor)
+Package documentation: [reflecttypefor](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/modernize#reflecttypefor)
 
 <a id='shadow'></a>
 ## `shadow`: check for possible unintended shadowing of variables
@@ -3809,7 +3807,7 @@ If the expression for the target element has side effects, this transformation w
 
 Default: on.
 
-Package documentation: [slicescontains](https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/modernize#slicescontains)
+Package documentation: [slicescontains](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/modernize#slicescontains)
 
 <a id='slicesdelete'></a>
 ## `slicesdelete`: replace append-based slice deletion with slices.Delete
@@ -3829,7 +3827,7 @@ This analyzer is disabled by default. The \`slices.Delete\` function zeros the e
 
 Default: off. Enable by setting `"analyses": {"slicesdelete": true}`.
 
-Package documentation: [slicesdelete](https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/modernize#slicesdelete)
+Package documentation: [slicesdelete](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/modernize#slicesdelete)
 
 <a id='slicessort'></a>
 ## `slicessort`: replace sort.Slice with slices.Sort for basic types
@@ -3843,7 +3841,7 @@ with the simpler \`slices.Sort(s)\`, which was added in Go 1.21.
 
 Default: on.
 
-Package documentation: [slicessort](https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/modernize#slicessort)
+Package documentation: [slicessort](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/modernize#slicessort)
 
 <a id='slog'></a>
 ## `slog`: check for invalid structured logging calls
@@ -3952,7 +3950,7 @@ The sole use of the finished string must be the last reference to the variable s
 
 Default: on.
 
-Package documentation: [stringsbuilder](https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/modernize#stringbuilder)
+Package documentation: [stringsbuilder](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/modernize#stringbuilder)
 
 <a id='stringscutprefix'></a>
 ## `stringscutprefix`: replace HasPrefix/TrimPrefix with CutPrefix
@@ -3986,7 +3984,7 @@ is fixed to:
 
 Default: on.
 
-Package documentation: [stringscutprefix](https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/modernize#stringscutprefix)
+Package documentation: [stringscutprefix](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/modernize#stringscutprefix)
 
 <a id='stringsseq'></a>
 ## `stringsseq`: replace ranging over Split/Fields with SplitSeq/FieldsSeq
@@ -4004,7 +4002,7 @@ which was added in Go 1.24 and avoids allocating a slice for the substrings. The
 
 Default: on.
 
-Package documentation: [stringsseq](https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/modernize#stringsseq)
+Package documentation: [stringsseq](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/modernize#stringsseq)
 
 <a id='structtag'></a>
 ## `structtag`: check that struct field tags conform to reflect.StructTag.Get
@@ -4031,7 +4029,7 @@ This change is only suggested if the \`cancel\` function is not used for any oth
 
 Default: on.
 
-Package documentation: [testingcontext](https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/modernize#testingcontext)
+Package documentation: [testingcontext](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/modernize#testingcontext)
 
 <a id='testinggoroutine'></a>
 ## `testinggoroutine`: report calls to (*testing.T).Fatal from goroutines started by a test
@@ -4254,7 +4252,7 @@ which was added in Go 1.25.
 
 Default: on.
 
-Package documentation: [waitgroup](https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/modernize#waitgroup)
+Package documentation: [waitgroup](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/modernize#waitgroup)
 
 <a id='yield'></a>
 ## `yield`: report calls to yield where the result is ignored
