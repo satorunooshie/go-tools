@@ -47,6 +47,7 @@ import (
 	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/gopls/internal/cache"
 	"golang.org/x/tools/gopls/internal/util/safetoken"
+	"golang.org/x/tools/internal/analysisinternal"
 	"golang.org/x/tools/internal/typeparams"
 	"golang.org/x/tools/internal/typesinternal"
 	"golang.org/x/tools/refactor/satisfy"
@@ -354,7 +355,7 @@ func forEachLexicalRef(pkg *cache.Package, obj types.Object, fn func(id *ast.Ide
 		switch n := cur.Node().(type) {
 		case *ast.Ident:
 			if pkg.TypesInfo().Uses[n] == obj {
-				block := enclosingBlock(pkg.TypesInfo(), cur)
+				block := analysisinternal.EnclosingScope(pkg.TypesInfo(), cur)
 				if !fn(n, block) {
 					ok = false
 				}
@@ -397,27 +398,6 @@ func forEachLexicalRef(pkg *cache.Package, obj types.Object, fn func(id *ast.Ide
 		}
 	}
 	return ok
-}
-
-// enclosingBlock returns the innermost block logically enclosing the
-// AST node (an ast.Ident), specified as a Cursor.
-func enclosingBlock(info *types.Info, curId inspector.Cursor) *types.Scope {
-	for cur := range curId.Enclosing() {
-		n := cur.Node()
-		// For some reason, go/types always associates a
-		// function's scope with its FuncType.
-		// See comments about scope above.
-		switch f := n.(type) {
-		case *ast.FuncDecl:
-			n = f.Type
-		case *ast.FuncLit:
-			n = f.Type
-		}
-		if b := info.Scopes[n]; b != nil {
-			return b
-		}
-	}
-	panic("no Scope for *ast.File")
 }
 
 func (r *renamer) checkLabel(label *types.Label) {
@@ -932,6 +912,17 @@ func isValidIdentifier(id string) bool {
 		}
 	}
 	return token.Lookup(id) == token.IDENT
+}
+
+// isValidPackagePath reports whether newPath is a valid new path for the
+// package currently at oldPath. For now, we only support renames that
+// do not result in a package move.
+// TODO(mkalil): support package renames with arbitrary package paths, including
+// relative paths.
+func isValidPackagePath(oldPath, newPath string) bool {
+	// We prompt with the full package path, but some users may delete this and
+	// just enter a package identifier, which we should still support.
+	return isValidIdentifier(newPath) || filepath.Dir(oldPath) == filepath.Dir(newPath)
 }
 
 // isLocal reports whether obj is local to some function.
