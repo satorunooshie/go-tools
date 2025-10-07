@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"golang.org/x/tools/go/analysis"
+	"golang.org/x/tools/go/ast/edge"
 	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/internal/moreiters"
 	"golang.org/x/tools/internal/typesinternal"
@@ -585,7 +586,7 @@ func DeleteStmt(fset *token.FileSet, curStmt inspector.Cursor) []analysis.TextEd
 	}
 	// and now for the comments
 Outer:
-	for _, cg := range enclosingFile(curStmt).Comments {
+	for _, cg := range EnclosingFile(curStmt).Comments {
 		for _, co := range cg.List {
 			if lineOf(co.End()) < stmtStartLine {
 				continue
@@ -673,8 +674,10 @@ type tokenRange struct{ StartPos, EndPos token.Pos }
 func (r tokenRange) Pos() token.Pos { return r.StartPos }
 func (r tokenRange) End() token.Pos { return r.EndPos }
 
-// enclosingFile returns the syntax tree for the file enclosing c.
-func enclosingFile(c inspector.Cursor) *ast.File {
+// EnclosingFile returns the syntax tree for the file enclosing c.
+//
+// TODO(adonovan): promote this to a method of Cursor.
+func EnclosingFile(c inspector.Cursor) *ast.File {
 	c, _ = moreiters.First(c.Enclosing((*ast.File)(nil)))
 	return c.Node().(*ast.File)
 }
@@ -695,4 +698,12 @@ func EnclosingScope(info *types.Info, cur inspector.Cursor) *types.Scope {
 		}
 	}
 	panic("no Scope for *ast.File")
+}
+
+// IsChildOf reports whether cur.ParentEdge is ek.
+//
+// TODO(adonovan): promote to a method of Cursor.
+func IsChildOf(cur inspector.Cursor, ek edge.Kind) bool {
+	got, _ := cur.ParentEdge()
+	return got == ek
 }

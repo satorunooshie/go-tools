@@ -1450,7 +1450,13 @@
 						},
 						{
 							"Name": "\"errorsas\"",
-							"Doc": "report passing non-pointer or non-error values to errors.As\n\nThe errorsas analysis reports calls to errors.As where the type\nof the second argument is not a pointer to a type implementing error.",
+							"Doc": "report passing non-pointer or non-error values to errors.As\n\nThe errorsas analyzer reports calls to errors.As where the type\nof the second argument is not a pointer to a type implementing error.",
+							"Default": "true",
+							"Status": ""
+						},
+						{
+							"Name": "\"errorsastype\"",
+							"Doc": "replace errors.As with errors.AsType[T]\n\nThis analyzer suggests fixes to simplify uses of [errors.As] of\nthis form:\n\n\tvar myerr *MyErr\n\tif errors.As(err, \u0026myerr) {\n\t\thandle(myerr)\n\t}\n\nby using the less error-prone generic [errors.AsType] function,\nintroduced in Go 1.26:\n\n\tif myerr, ok := errors.AsType[*MyErr](err); ok {\n\t\thandle(myerr)\n\t}\n\nThe fix is only offered if the var declaration has the form shown and\nthere are no uses of myerr outside the if statement.",
 							"Default": "true",
 							"Status": ""
 						},
@@ -1661,6 +1667,12 @@
 						{
 							"Name": "\"sortslice\"",
 							"Doc": "check the argument type of sort.Slice\n\nsort.Slice requires an argument of a slice type. Check that\nthe interface{} value passed to sort.Slice is actually a slice.",
+							"Default": "true",
+							"Status": ""
+						},
+						{
+							"Name": "\"stditerators\"",
+							"Doc": "use iterators instead of Len/At-style APIs\n\nThis analyzer suggests a fix to replace each loop of the form:\n\n\tfor i := 0; i \u003c x.Len(); i++ {\n\t\tuse(x.At(i))\n\t}\n\nor its \"for elem := range x.Len()\" equivalent by a range loop over an\niterator offered by the same data type:\n\n\tfor elem := range x.All() {\n\t\tuse(x.At(i)\n\t}\n\nwhere x is one of various well-known types in the standard library.",
 							"Default": "true",
 							"Status": ""
 						},
@@ -3324,8 +3336,14 @@
 		},
 		{
 			"Name": "errorsas",
-			"Doc": "report passing non-pointer or non-error values to errors.As\n\nThe errorsas analysis reports calls to errors.As where the type\nof the second argument is not a pointer to a type implementing error.",
+			"Doc": "report passing non-pointer or non-error values to errors.As\n\nThe errorsas analyzer reports calls to errors.As where the type\nof the second argument is not a pointer to a type implementing error.",
 			"URL": "https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/errorsas",
+			"Default": true
+		},
+		{
+			"Name": "errorsastype",
+			"Doc": "replace errors.As with errors.AsType[T]\n\nThis analyzer suggests fixes to simplify uses of [errors.As] of\nthis form:\n\n\tvar myerr *MyErr\n\tif errors.As(err, \u0026myerr) {\n\t\thandle(myerr)\n\t}\n\nby using the less error-prone generic [errors.AsType] function,\nintroduced in Go 1.26:\n\n\tif myerr, ok := errors.AsType[*MyErr](err); ok {\n\t\thandle(myerr)\n\t}\n\nThe fix is only offered if the var declaration has the form shown and\nthere are no uses of myerr outside the if statement.",
+			"URL": "https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/modernize#errorsastype",
 			"Default": true
 		},
 		{
@@ -3536,6 +3554,12 @@
 			"Name": "sortslice",
 			"Doc": "check the argument type of sort.Slice\n\nsort.Slice requires an argument of a slice type. Check that\nthe interface{} value passed to sort.Slice is actually a slice.",
 			"URL": "https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/sortslice",
+			"Default": true
+		},
+		{
+			"Name": "stditerators",
+			"Doc": "use iterators instead of Len/At-style APIs\n\nThis analyzer suggests a fix to replace each loop of the form:\n\n\tfor i := 0; i \u003c x.Len(); i++ {\n\t\tuse(x.At(i))\n\t}\n\nor its \"for elem := range x.Len()\" equivalent by a range loop over an\niterator offered by the same data type:\n\n\tfor elem := range x.All() {\n\t\tuse(x.At(i)\n\t}\n\nwhere x is one of various well-known types in the standard library.",
+			"URL": "https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/modernize#stditerators",
 			"Default": true
 		},
 		{

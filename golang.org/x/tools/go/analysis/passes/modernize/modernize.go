@@ -20,7 +20,6 @@ import (
 	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/internal/analysisinternal"
 	"golang.org/x/tools/internal/analysisinternal/generated"
-	"golang.org/x/tools/internal/astutil"
 	"golang.org/x/tools/internal/moreiters"
 	"golang.org/x/tools/internal/stdlib"
 	"golang.org/x/tools/internal/versions"
@@ -45,6 +44,7 @@ var Suite = []*analysis.Analyzer{
 	SlicesContainsAnalyzer,
 	// SlicesDeleteAnalyzer, // not nil-preserving!
 	SlicesSortAnalyzer,
+	stditeratorsAnalyzer,
 	StringsCutPrefixAnalyzer,
 	StringsSeqAnalyzer,
 	StringsBuilderAnalyzer,
@@ -64,12 +64,6 @@ func skipGenerated(pass *analysis.Pass) {
 		}
 		report(diag)
 	}
-}
-
-// equalSyntax reports whether x and y are syntactically equal (ignoring comments).
-func equalSyntax(x, y ast.Expr) bool {
-	sameName := func(x, y *ast.Ident) bool { return x.Name == y.Name }
-	return astutil.Equal(x, y, sameName)
 }
 
 // formatExprs formats a comma-separated list of expressions.
@@ -124,12 +118,6 @@ func fileUses(info *types.Info, file *ast.File, version string) bool {
 	return !versions.Before(info.FileVersions[file], version)
 }
 
-// enclosingFile returns the syntax tree for the file enclosing c.
-func enclosingFile(c inspector.Cursor) *ast.File {
-	c, _ = moreiters.First(c.Enclosing((*ast.File)(nil)))
-	return c.Node().(*ast.File)
-}
-
 // within reports whether the current pass is analyzing one of the
 // specified standard packages or their dependencies.
 func within(pass *analysis.Pass, pkgs ...string) bool {
@@ -138,22 +126,13 @@ func within(pass *analysis.Pass, pkgs ...string) bool {
 		moreiters.Contains(stdlib.Dependencies(pkgs...), path)
 }
 
-// childOf reports whether cur.ParentEdge is ek.
-func childOf(cur inspector.Cursor, ek edge.Kind) bool {
-	got, _ := cur.ParentEdge()
-	return got == ek
-}
-
 // unparenEnclosing removes enclosing parens from cur in
 // preparation for a call to [Cursor.ParentEdge].
 func unparenEnclosing(cur inspector.Cursor) inspector.Cursor {
-	for {
-		ek, _ := cur.ParentEdge()
-		if ek != edge.ParenExpr_X {
-			return cur
-		}
+	for analysisinternal.IsChildOf(cur, edge.ParenExpr_X) {
 		cur = cur.Parent()
 	}
+	return cur
 }
 
 var (

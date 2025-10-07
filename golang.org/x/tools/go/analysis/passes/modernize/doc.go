@@ -89,6 +89,28 @@ The any analyzer suggests replacing uses of the empty interface type,
 `interface{}`, with the `any` alias, which was introduced in Go 1.18.
 This is a purely stylistic change that makes code more readable.
 
+# Analyzer errorsastype
+
+errorsastype: replace errors.As with errors.AsType[T]
+
+This analyzer suggests fixes to simplify uses of [errors.As] of
+this form:
+
+	var myerr *MyErr
+	if errors.As(err, &myerr) {
+		handle(myerr)
+	}
+
+by using the less error-prone generic [errors.AsType] function,
+introduced in Go 1.26:
+
+	if myerr, ok := errors.AsType[*MyErr](err); ok {
+		handle(myerr)
+	}
+
+The fix is only offered if the var declaration has the form shown and
+there are no uses of myerr outside the if statement.
+
 # Analyzer fmtappendf
 
 fmtappendf: replace []byte(fmt.Sprintf) with fmt.Appendf
@@ -269,6 +291,25 @@ types. It replaces
 	sort.Slice(s, func(i, j int) bool { return s[i] < s[j] })
 
 with the simpler `slices.Sort(s)`, which was added in Go 1.21.
+
+# Analyzer stditerators
+
+stditerators: use iterators instead of Len/At-style APIs
+
+This analyzer suggests a fix to replace each loop of the form:
+
+	for i := 0; i < x.Len(); i++ {
+		use(x.At(i))
+	}
+
+or its "for elem := range x.Len()" equivalent by a range loop over an
+iterator offered by the same data type:
+
+	for elem := range x.All() {
+		use(x.At(i)
+	}
+
+where x is one of various well-known types in the standard library.
 
 # Analyzer stringscutprefix
 

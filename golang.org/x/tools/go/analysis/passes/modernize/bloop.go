@@ -18,6 +18,7 @@ import (
 	"golang.org/x/tools/internal/analysisinternal"
 	"golang.org/x/tools/internal/analysisinternal/generated"
 	typeindexanalyzer "golang.org/x/tools/internal/analysisinternal/typeindex"
+	"golang.org/x/tools/internal/astutil"
 	"golang.org/x/tools/internal/moreiters"
 	"golang.org/x/tools/internal/typesinternal/typeindex"
 )
@@ -117,15 +118,8 @@ func bloop(pass *analysis.Pass) (any, error) {
 						//    ...no references to i...
 						//  }
 						body, _ := curLoop.LastChild()
-						if assign, ok := n.Init.(*ast.AssignStmt); ok &&
-							assign.Tok == token.DEFINE &&
-							len(assign.Rhs) == 1 &&
-							isZeroIntLiteral(info, assign.Rhs[0]) &&
-							is[*ast.IncDecStmt](n.Post) &&
-							n.Post.(*ast.IncDecStmt).Tok == token.INC &&
-							equalSyntax(n.Post.(*ast.IncDecStmt).X, assign.Lhs[0]) &&
-							!uses(index, body, info.Defs[assign.Lhs[0].(*ast.Ident)]) {
-
+						if v := isIncrementLoop(info, n); v != nil &&
+							!uses(index, body, v) {
 							delStart, delEnd = n.Init.Pos(), n.Post.End()
 						}
 
@@ -237,4 +231,19 @@ func isBenchmarkFunc(f *ast.FuncDecl) bool {
 		strings.HasPrefix(f.Name.Name, "Benchmark") &&
 		f.Type.Params != nil &&
 		len(f.Type.Params.List) == 1
+}
+
+// isIncrementLoop reports whether loop has the form "for i := 0; ...; i++ { ... }",
+// and if so, it returns the symbol for the index variable.
+func isIncrementLoop(info *types.Info, loop *ast.ForStmt) *types.Var {
+	if assign, ok := loop.Init.(*ast.AssignStmt); ok &&
+		assign.Tok == token.DEFINE &&
+		len(assign.Rhs) == 1 &&
+		isZeroIntLiteral(info, assign.Rhs[0]) &&
+		is[*ast.IncDecStmt](loop.Post) &&
+		loop.Post.(*ast.IncDecStmt).Tok == token.INC &&
+		astutil.EqualSyntax(loop.Post.(*ast.IncDecStmt).X, assign.Lhs[0]) {
+		return info.Defs[assign.Lhs[0].(*ast.Ident)].(*types.Var)
+	}
+	return nil
 }
