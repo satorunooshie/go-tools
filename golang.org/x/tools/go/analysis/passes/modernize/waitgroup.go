@@ -18,6 +18,7 @@ import (
 	"golang.org/x/tools/internal/analysisinternal/generated"
 	typeindexanalyzer "golang.org/x/tools/internal/analysisinternal/typeindex"
 	"golang.org/x/tools/internal/astutil"
+	"golang.org/x/tools/internal/refactor"
 	"golang.org/x/tools/internal/typesinternal/typeindex"
 )
 
@@ -126,10 +127,11 @@ func waitgroup(pass *analysis.Pass) (any, error) {
 			panic("can't find Cursor for 'done' statement")
 		}
 
-		file := analysisinternal.EnclosingFile(curAddCall)
+		file := astutil.EnclosingFile(curAddCall)
 		if !fileUses(info, file, "go1.25") {
 			continue
 		}
+		tokFile := pass.Fset.File(file.Pos())
 
 		var addCallRecvText bytes.Buffer
 		err := printer.Fprint(&addCallRecvText, pass.Fset, addCallRecv)
@@ -145,9 +147,9 @@ func waitgroup(pass *analysis.Pass) (any, error) {
 				Message: "Simplify by using WaitGroup.Go",
 				TextEdits: slices.Concat(
 					// delete "wg.Add(1)"
-					analysisinternal.DeleteStmt(pass.Fset, curAddStmt),
+					refactor.DeleteStmt(tokFile, curAddStmt),
 					// delete "wg.Done()" or "defer wg.Done()"
-					analysisinternal.DeleteStmt(pass.Fset, curDoneStmt),
+					refactor.DeleteStmt(tokFile, curDoneStmt),
 					[]analysis.TextEdit{
 						// go    func()
 						// ------

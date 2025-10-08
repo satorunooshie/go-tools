@@ -16,6 +16,8 @@ import (
 	"golang.org/x/tools/internal/analysisinternal"
 	"golang.org/x/tools/internal/analysisinternal/generated"
 	"golang.org/x/tools/internal/astutil"
+	"golang.org/x/tools/internal/refactor"
+	"golang.org/x/tools/internal/typesinternal"
 )
 
 // Warning: this analyzer is not safe to enable by default (not nil-preserving).
@@ -60,7 +62,7 @@ func slicesdelete(pass *analysis.Pass) (any, error) {
 			return false
 		}
 
-		_, prefix, edits := analysisinternal.AddImport(info, file, "slices", "slices", "Delete", call.Pos())
+		prefix, edits := refactor.AddImport(info, file, "slices", "slices", "Delete", call.Pos())
 		// append's indices may be any integer type; slices.Delete requires int.
 		// Insert int conversions as needed (and if possible).
 		if isIntShadowed() && (!isIntExpr(slice1.High) || !isIntExpr(slice2.Low)) {
@@ -141,7 +143,8 @@ func slicesdelete(pass *analysis.Pass) (any, error) {
 					slice2, ok2 := call.Args[1].(*ast.SliceExpr)
 					if ok1 && slice1.Low == nil && !slice1.Slice3 &&
 						ok2 && slice2.High == nil && !slice2.Slice3 &&
-						astutil.EqualSyntax(slice1.X, slice2.X) && noEffects(info, slice1.X) &&
+						astutil.EqualSyntax(slice1.X, slice2.X) &&
+						typesinternal.NoEffects(info, slice1.X) &&
 						increasingSliceIndices(info, slice1.High, slice2.Low) {
 						// Have append(s[:a], s[b:]...) where we can verify a < b.
 						report(file, call, slice1, slice2)

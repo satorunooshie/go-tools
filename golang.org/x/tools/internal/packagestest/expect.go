@@ -228,14 +228,14 @@ func (e *Exported) getMarkers() error {
 }
 
 var (
-	noteType       = reflect.TypeOf((*expect.Note)(nil))
-	identifierType = reflect.TypeOf(expect.Identifier(""))
-	posType        = reflect.TypeOf(token.Pos(0))
-	positionType   = reflect.TypeOf(token.Position{})
-	rangeType      = reflect.TypeOf(Range{})
-	fsetType       = reflect.TypeOf((*token.FileSet)(nil))
-	regexType      = reflect.TypeOf((*regexp.Regexp)(nil))
-	exportedType   = reflect.TypeOf((*Exported)(nil))
+	noteType       = reflect.TypeFor[*expect.Note]()
+	identifierType = reflect.TypeFor[expect.Identifier]()
+	posType        = reflect.TypeFor[token.Pos]()
+	positionType   = reflect.TypeFor[token.Position]()
+	rangeType      = reflect.TypeFor[Range]()
+	fsetType       = reflect.TypeFor[*token.FileSet]()
+	regexType      = reflect.TypeFor[*regexp.Regexp]()
+	exportedType   = reflect.TypeFor[*Exported]()
 )
 
 // converter converts from a marker's argument parsed from the comment to
@@ -419,21 +419,21 @@ func (e *Exported) rangeConverter(n *expect.Note, args []any) (Range, []any, err
 			return mark, args, nil
 		}
 	case string:
-		start, end, err := expect.MatchBefore(e.ExpectFileSet, e.FileContents, n.Pos, arg)
+		start, end, err := expect.MatchBefore(tokFile, e.FileContents, n.Pos, arg)
 		if err != nil {
 			return Range{}, nil, err
 		}
 		if !start.IsValid() {
-			return Range{}, nil, fmt.Errorf("%v: pattern %s did not match", e.ExpectFileSet.Position(n.Pos), arg)
+			return Range{}, nil, fmt.Errorf("%v: pattern %s did not match", tokFile.Position(n.Pos), arg)
 		}
 		return newRange(tokFile, start, end), args, nil
 	case *regexp.Regexp:
-		start, end, err := expect.MatchBefore(e.ExpectFileSet, e.FileContents, n.Pos, arg)
+		start, end, err := expect.MatchBefore(tokFile, e.FileContents, n.Pos, arg)
 		if err != nil {
 			return Range{}, nil, err
 		}
 		if !start.IsValid() {
-			return Range{}, nil, fmt.Errorf("%v: pattern %s did not match", e.ExpectFileSet.Position(n.Pos), arg)
+			return Range{}, nil, fmt.Errorf("%v: pattern %s did not match", tokFile.Position(n.Pos), arg)
 		}
 		return newRange(tokFile, start, end), args, nil
 	default:
