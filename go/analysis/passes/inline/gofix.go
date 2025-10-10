@@ -23,6 +23,7 @@ import (
 	"golang.org/x/tools/internal/analysisinternal"
 	"golang.org/x/tools/internal/astutil"
 	"golang.org/x/tools/internal/diff"
+	"golang.org/x/tools/internal/packagepath"
 	"golang.org/x/tools/internal/refactor"
 	"golang.org/x/tools/internal/refactor/inline"
 	"golang.org/x/tools/internal/typesinternal"
@@ -172,7 +173,7 @@ func (a *analyzer) inlineCall(call *ast.CallExpr, cur inspector.Cursor) {
 			a.pass.Reportf(call.Lparen, "invalid inlining candidate: cannot read source file: %v", err)
 			return
 		}
-		curFile := currentFile(cur)
+		curFile := astutil.EnclosingFile(cur)
 		caller := &inline.Caller{
 			Fset:    a.pass.Fset,
 			Types:   a.pass.Pkg,
@@ -251,7 +252,7 @@ func (a *analyzer) inlineAlias(tn *types.TypeName, curId inspector.Cursor) {
 	}
 	rhs := alias.Rhs()
 	curPath := a.pass.Pkg.Path()
-	curFile := currentFile(curId)
+	curFile := astutil.EnclosingFile(curId)
 	id := curId.Node().(*ast.Ident)
 	// We have an identifier A here (n), possibly qualified by a package
 	// identifier (sel.n), and an inlinable "type A = rhs" elsewhere.
@@ -282,7 +283,7 @@ func (a *analyzer) inlineAlias(tn *types.TypeName, curId inspector.Cursor) {
 			if obj != tn {
 				return
 			}
-		} else if !analysisinternal.CanImport(a.pass.Pkg.Path(), pkgPath) {
+		} else if !packagepath.CanImport(a.pass.Pkg.Path(), pkgPath) {
 			// If this package can't see the package of this part of rhs, we can't inline.
 			return
 		} else if _, ok := importPrefixes[pkgPath]; !ok {
@@ -425,7 +426,7 @@ func (a *analyzer) inlineConst(con *types.Const, cur inspector.Cursor) {
 	}
 
 	// If n is qualified by a package identifier, we'll need the full selector expression.
-	curFile := currentFile(cur)
+	curFile := astutil.EnclosingFile(cur)
 	n := cur.Node().(*ast.Ident)
 
 	// We have an identifier A here (n), possibly qualified by a package identifier (sel.X,
@@ -450,7 +451,7 @@ func (a *analyzer) inlineConst(con *types.Const, cur inspector.Cursor) {
 			// "B" means something different here than at the inlinable const's scope.
 			return
 		}
-	} else if !analysisinternal.CanImport(a.pass.Pkg.Path(), incon.RHSPkgPath) {
+	} else if !packagepath.CanImport(a.pass.Pkg.Path(), incon.RHSPkgPath) {
 		// If this package can't see the RHS's package, we can't inline.
 		return
 	}
@@ -501,14 +502,6 @@ func (a *analyzer) readFile(node ast.Node) ([]byte, error) {
 		a.fileContent[filename] = content
 	}
 	return content, nil
-}
-
-// currentFile returns the unique ast.File for a cursor.
-func currentFile(c inspector.Cursor) *ast.File {
-	for cf := range c.Enclosing((*ast.File)(nil)) {
-		return cf.Node().(*ast.File)
-	}
-	panic("no *ast.File enclosing a cursor: impossible")
 }
 
 // A goFixInlineFuncFact is exported for each function marked "//go:fix inline".
