@@ -165,7 +165,7 @@ func Definition(ctx context.Context, snapshot *cache.Snapshot, fh file.Handle, p
 	}
 
 	// The general case: the cursor is on an identifier.
-	_, obj, _ := referencedObject(pkg, pgf, pos)
+	_, obj, _ := hoverDefinitionObjectAtPos(pkg.TypesInfo(), pgf, pos)
 	if obj == nil {
 		return nil, nil
 	}
@@ -304,9 +304,9 @@ func builtinDecl(ctx context.Context, snapshot *cache.Snapshot, obj types.Object
 	return pgf, ident, nil
 }
 
-// referencedObject returns the identifier and object referenced at the
+// hoverDefinitionObjectAtPos returns the identifier and object referenced at the
 // specified position, which must be within the file pgf, for the purposes of
-// definition/hover/call hierarchy operations. It returns a nil object if no
+// hover and definition operations. It returns a nil object if no
 // object was found at the given position.
 //
 // If the returned identifier is a type-switch implicit (i.e. the x in x :=
@@ -315,22 +315,20 @@ func builtinDecl(ctx context.Context, snapshot *cache.Snapshot, obj types.Object
 // limitations of the go/types API, which does not report an object for the
 // identifier x.
 //
-// For embedded fields, referencedObject returns the type name object rather
+// For embedded fields, hoverDefinitionObjectAtPos returns the type name object rather
 // than the var (field) object.
 //
 // TODO(rfindley): this function exists to preserve the pre-existing behavior
 // of golang.Identifier. Eliminate this helper in favor of sharing
-// functionality with objectsAt, after choosing suitable primitives.
-func referencedObject(pkg *cache.Package, pgf *parsego.File, pos token.Pos) (*ast.Ident, types.Object, types.Type) {
+// functionality with [objectsAt] and [pathEnclosingObjNode]
+// after choosing suitable primitives.
+func hoverDefinitionObjectAtPos(info *types.Info, pgf *parsego.File, pos token.Pos) (*ast.Ident, types.Object, types.Type) {
 	path := pathEnclosingObjNode(pgf.File, pos)
 	if len(path) == 0 {
 		return nil, nil, nil
 	}
-	var obj types.Object
-	info := pkg.TypesInfo()
-	switch n := path[0].(type) {
-	case *ast.Ident:
-		obj = info.ObjectOf(n)
+	if id, ok := path[0].(*ast.Ident); ok {
+		obj := info.ObjectOf(id)
 		// If n is the var's declaring ident in a type switch
 		// [i.e. the x in x := foo.(type)], it will not have an object. In this
 		// case, set obj to the first implicit object (if any), and return the type
@@ -340,7 +338,7 @@ func referencedObject(pkg *cache.Package, pgf *parsego.File, pos token.Pos) (*as
 		// implicit objects; this is a type error ("unused x"),
 		if obj == nil {
 			if implicits, typ := typeSwitchImplicits(info, path); len(implicits) > 0 {
-				return n, implicits[0], typ
+				return id, implicits[0], typ
 			}
 		}
 
@@ -348,11 +346,11 @@ func referencedObject(pkg *cache.Package, pgf *parsego.File, pos token.Pos) (*as
 		// to the field's type definition, not the field's definition.
 		if v, ok := obj.(*types.Var); ok && v.Embedded() {
 			// types.Info.Uses contains the embedded field's *types.TypeName.
-			if typeName := info.Uses[n]; typeName != nil {
+			if typeName := info.Uses[id]; typeName != nil {
 				obj = typeName
 			}
 		}
-		return n, obj, nil
+		return id, obj, nil
 	}
 	return nil, nil, nil
 }
