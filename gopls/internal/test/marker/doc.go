@@ -209,7 +209,9 @@ Here is the list of supported action markers:
 
   - hover(src, dst location, sm stringMatcher): performs a textDocument/hover
     at the src location, and checks that the result is the dst location, with
-    matching hover content.
+    matching hover content. Be careful to avoid self-satisfying hover markers:
+    if the hover content literally includes the marker comment itself,
+    it will always contain the expected string! A backslash escape may help.
 
   - hovererr(src, sm stringMatcher): performs a textDocument/hover at the src
     location, and checks that the error matches the given stringMatcher.
