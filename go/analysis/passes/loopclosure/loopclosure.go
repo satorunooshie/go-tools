@@ -13,7 +13,7 @@ import (
 	"golang.org/x/tools/go/analysis/passes/inspect"
 	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/go/types/typeutil"
-	"golang.org/x/tools/internal/analysisinternal"
+	"golang.org/x/tools/internal/analysis/analyzerutil"
 	"golang.org/x/tools/internal/typesinternal"
 	"golang.org/x/tools/internal/versions"
 )
@@ -23,7 +23,7 @@ var doc string
 
 var Analyzer = &analysis.Analyzer{
 	Name:     "loopclosure",
-	Doc:      analysisinternal.MustExtractDoc(doc, "loopclosure"),
+	Doc:      analyzerutil.MustExtractDoc(doc, "loopclosure"),
 	URL:      "https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/loopclosure",
 	Requires: []*analysis.Analyzer{inspect.Analyzer},
 	Run:      run,
@@ -55,8 +55,8 @@ func run(pass *analysis.Pass) (any, error) {
 		switch n := n.(type) {
 		case *ast.File:
 			// Only traverse the file if its goversion is strictly before go1.22.
-			goversion := versions.FileVersion(pass.TypesInfo, n)
-			return versions.Before(goversion, versions.Go1_22)
+			return !analyzerutil.FileUsesGoVersion(pass, n, versions.Go1_22)
+
 		case *ast.RangeStmt:
 			body = n.Body
 			addVar(n.Key)
@@ -356,11 +356,12 @@ func isMethodCall(info *types.Info, expr ast.Expr, pkgPath, typeName, method str
 	}
 
 	// Check that we are calling a method <method>
+	// TODO(adonovan): use [typesinternal.IsMethodNamed].
 	f := typeutil.StaticCallee(info, call)
 	if f == nil || f.Name() != method {
 		return false
 	}
-	recv := f.Type().(*types.Signature).Recv()
+	recv := f.Signature().Recv()
 	if recv == nil {
 		return false
 	}

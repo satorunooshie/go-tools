@@ -15,17 +15,18 @@ import (
 	"golang.org/x/tools/go/ast/edge"
 	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/go/types/typeutil"
-	"golang.org/x/tools/internal/analysisinternal"
-	"golang.org/x/tools/internal/analysisinternal/generated"
-	typeindexanalyzer "golang.org/x/tools/internal/analysisinternal/typeindex"
+	"golang.org/x/tools/internal/analysis/analyzerutil"
+	"golang.org/x/tools/internal/analysis/generated"
+	typeindexanalyzer "golang.org/x/tools/internal/analysis/typeindex"
 	"golang.org/x/tools/internal/astutil"
 	"golang.org/x/tools/internal/typesinternal"
 	"golang.org/x/tools/internal/typesinternal/typeindex"
+	"golang.org/x/tools/internal/versions"
 )
 
 var RangeIntAnalyzer = &analysis.Analyzer{
 	Name: "rangeint",
-	Doc:  analysisinternal.MustExtractDoc(doc, "rangeint"),
+	Doc:  analyzerutil.MustExtractDoc(doc, "rangeint"),
 	Requires: []*analysis.Analyzer{
 		generated.Analyzer,
 		inspect.Analyzer,
@@ -68,12 +69,12 @@ var RangeIntAnalyzer = &analysis.Analyzer{
 func rangeint(pass *analysis.Pass) (any, error) {
 	skipGenerated(pass)
 
-	info := pass.TypesInfo
+	var (
+		info      = pass.TypesInfo
+		typeindex = pass.ResultOf[typeindexanalyzer.Analyzer].(*typeindex.Index)
+	)
 
-	inspect := pass.ResultOf[inspect.Analyzer].(*inspector.Inspector)
-	typeindex := pass.ResultOf[typeindexanalyzer.Analyzer].(*typeindex.Index)
-
-	for curFile := range filesUsing(inspect, info, "go1.22") {
+	for curFile := range filesUsingGoVersion(pass, versions.Go1_22) {
 	nextLoop:
 		for curLoop := range curFile.Preorder((*ast.ForStmt)(nil)) {
 			loop := curLoop.Node().(*ast.ForStmt)

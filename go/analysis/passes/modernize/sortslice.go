@@ -11,18 +11,19 @@ import (
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/inspect"
-	"golang.org/x/tools/internal/analysisinternal"
-	"golang.org/x/tools/internal/analysisinternal/generated"
-	typeindexanalyzer "golang.org/x/tools/internal/analysisinternal/typeindex"
+	"golang.org/x/tools/internal/analysis/analyzerutil"
+	"golang.org/x/tools/internal/analysis/generated"
+	typeindexanalyzer "golang.org/x/tools/internal/analysis/typeindex"
 	"golang.org/x/tools/internal/astutil"
 	"golang.org/x/tools/internal/refactor"
 	"golang.org/x/tools/internal/typesinternal/typeindex"
+	"golang.org/x/tools/internal/versions"
 )
 
 // (Not to be confused with go/analysis/passes/sortslice.)
 var SlicesSortAnalyzer = &analysis.Analyzer{
 	Name: "slicessort",
-	Doc:  analysisinternal.MustExtractDoc(doc, "slicessort"),
+	Doc:  analyzerutil.MustExtractDoc(doc, "slicessort"),
 	Requires: []*analysis.Analyzer{
 		generated.Analyzer,
 		inspect.Analyzer,
@@ -87,7 +88,7 @@ func slicessort(pass *analysis.Pass) (any, error) {
 					}
 					file := astutil.EnclosingFile(curCall)
 					if isIndex(compare.X, i) && isIndex(compare.Y, j) &&
-						fileUses(info, file, "go1.21") {
+						analyzerutil.FileUsesGoVersion(pass, file, versions.Go1_21) {
 						// Have: sort.Slice(s, func(i, j int) bool { return s[i] < s[j] })
 
 						prefix, importEdits := refactor.AddImport(

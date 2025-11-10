@@ -25,7 +25,7 @@ import (
 	"golang.org/x/tools/go/analysis/passes/inspect"
 	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/go/types/typeutil"
-	"golang.org/x/tools/internal/analysisinternal"
+	"golang.org/x/tools/internal/analysis/analyzerutil"
 	"golang.org/x/tools/internal/astutil"
 )
 
@@ -34,7 +34,7 @@ var doc string
 
 var Analyzer = &analysis.Analyzer{
 	Name:     "unusedresult",
-	Doc:      analysisinternal.MustExtractDoc(doc, "unusedresult"),
+	Doc:      analyzerutil.MustExtractDoc(doc, "unusedresult"),
 	URL:      "https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/unusedresult",
 	Requires: []*analysis.Analyzer{inspect.Analyzer},
 	Run:      run,
@@ -150,7 +150,7 @@ func run(pass *analysis.Pass) (any, error) {
 		if !ok {
 			return // e.g. var or builtin
 		}
-		if sig := fn.Type().(*types.Signature); sig.Recv() != nil {
+		if sig := fn.Signature(); sig.Recv() != nil {
 			// method (e.g. foo.String())
 			if types.Identical(sig, sigNoArgsStringResult) {
 				if stringMethods[fn.Name()] {

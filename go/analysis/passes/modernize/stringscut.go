@@ -18,19 +18,20 @@ import (
 	"golang.org/x/tools/go/ast/edge"
 	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/go/types/typeutil"
-	"golang.org/x/tools/internal/analysisinternal"
-	"golang.org/x/tools/internal/analysisinternal/generated"
-	typeindexanalyzer "golang.org/x/tools/internal/analysisinternal/typeindex"
+	"golang.org/x/tools/internal/analysis/analyzerutil"
+	"golang.org/x/tools/internal/analysis/generated"
+	typeindexanalyzer "golang.org/x/tools/internal/analysis/typeindex"
 	"golang.org/x/tools/internal/astutil"
 	"golang.org/x/tools/internal/goplsexport"
 	"golang.org/x/tools/internal/refactor"
 	"golang.org/x/tools/internal/typesinternal"
 	"golang.org/x/tools/internal/typesinternal/typeindex"
+	"golang.org/x/tools/internal/versions"
 )
 
 var stringscutAnalyzer = &analysis.Analyzer{
 	Name: "stringscut",
-	Doc:  analysisinternal.MustExtractDoc(doc, "stringscut"),
+	Doc:  analyzerutil.MustExtractDoc(doc, "stringscut"),
 	Requires: []*analysis.Analyzer{
 		generated.Analyzer,
 		inspect.Analyzer,
@@ -131,8 +132,7 @@ func stringscut(pass *analysis.Pass) (any, error) {
 	nextcall:
 		for curCall := range index.Calls(obj) {
 			// Check file version.
-			file := astutil.EnclosingFile(curCall)
-			if !fileUses(info, file, "go1.18") {
+			if !analyzerutil.FileUsesGoVersion(pass, astutil.EnclosingFile(curCall), versions.Go1_18) {
 				continue // strings.Index not available in this file
 			}
 			indexCall := curCall.Node().(*ast.CallExpr) // the call to strings.Index, etc.

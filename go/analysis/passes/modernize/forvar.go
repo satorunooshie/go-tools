@@ -10,16 +10,16 @@ import (
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/inspect"
-	"golang.org/x/tools/go/ast/inspector"
-	"golang.org/x/tools/internal/analysisinternal"
-	"golang.org/x/tools/internal/analysisinternal/generated"
+	"golang.org/x/tools/internal/analysis/analyzerutil"
+	"golang.org/x/tools/internal/analysis/generated"
 	"golang.org/x/tools/internal/astutil"
 	"golang.org/x/tools/internal/refactor"
+	"golang.org/x/tools/internal/versions"
 )
 
 var ForVarAnalyzer = &analysis.Analyzer{
 	Name: "forvar",
-	Doc:  analysisinternal.MustExtractDoc(doc, "forvar"),
+	Doc:  analyzerutil.MustExtractDoc(doc, "forvar"),
 	Requires: []*analysis.Analyzer{
 		generated.Analyzer,
 		inspect.Analyzer,
@@ -39,14 +39,13 @@ var ForVarAnalyzer = &analysis.Analyzer{
 // where the two idents are the same,
 // and the ident is defined (:=) as a variable in the for statement.
 // (Note that this 'fix' does not work for three clause loops
-// because the Go specification says "The variable used by each subsequent iteration
+// because the Go specfilesUsingGoVersionsays "The variable used by each subsequent iteration
 // is declared implicitly before executing the post statement and initialized to the
 // value of the previous iteration's variable at that moment.")
 func forvar(pass *analysis.Pass) (any, error) {
 	skipGenerated(pass)
 
-	inspect := pass.ResultOf[inspect.Analyzer].(*inspector.Inspector)
-	for curFile := range filesUsing(inspect, pass.TypesInfo, "go1.22") {
+	for curFile := range filesUsingGoVersion(pass, versions.Go1_22) {
 		for curLoop := range curFile.Preorder((*ast.RangeStmt)(nil)) {
 			loop := curLoop.Node().(*ast.RangeStmt)
 			if loop.Tok != token.DEFINE {

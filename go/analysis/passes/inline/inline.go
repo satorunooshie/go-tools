@@ -20,7 +20,7 @@ import (
 	"golang.org/x/tools/go/ast/edge"
 	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/go/types/typeutil"
-	"golang.org/x/tools/internal/analysisinternal"
+	"golang.org/x/tools/internal/analysis/analyzerutil"
 	"golang.org/x/tools/internal/astutil"
 	"golang.org/x/tools/internal/diff"
 	"golang.org/x/tools/internal/moreiters"
@@ -35,7 +35,7 @@ var doc string
 
 var Analyzer = &analysis.Analyzer{
 	Name: "inline",
-	Doc:  analysisinternal.MustExtractDoc(doc, "inline"),
+	Doc:  analyzerutil.MustExtractDoc(doc, "inline"),
 	URL:  "https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/inline",
 	Run:  run,
 	FactTypes: []analysis.Fact{
@@ -416,8 +416,8 @@ func typenames(t types.Type) []*types.TypeName {
 			visit(t.Key())
 			visit(t.Elem())
 		case *types.Struct:
-			for i := range t.NumFields() {
-				visit(t.Field(i).Type())
+			for field := range t.Fields() {
+				visit(field.Type())
 			}
 		case *types.Signature:
 			// Ignore the receiver: although it may be present, it has no meaning
@@ -430,11 +430,11 @@ func typenames(t types.Type) []*types.TypeName {
 			visit(t.Params())
 			visit(t.Results())
 		case *types.Interface:
-			for i := range t.NumEmbeddeds() {
-				visit(t.EmbeddedType(i))
+			for etyp := range t.EmbeddedTypes() {
+				visit(etyp)
 			}
-			for i := range t.NumExplicitMethods() {
-				visit(t.ExplicitMethod(i).Type())
+			for method := range t.ExplicitMethods() {
+				visit(method.Type())
 			}
 		case *types.Tuple:
 			for v := range t.Variables() {

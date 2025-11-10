@@ -14,9 +14,9 @@ import (
 	"golang.org/x/tools/go/ast/edge"
 	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/go/types/typeutil"
-	"golang.org/x/tools/internal/analysisinternal"
-	"golang.org/x/tools/internal/analysisinternal/generated"
-	typeindexanalyzer "golang.org/x/tools/internal/analysisinternal/typeindex"
+	"golang.org/x/tools/internal/analysis/analyzerutil"
+	"golang.org/x/tools/internal/analysis/generated"
+	typeindexanalyzer "golang.org/x/tools/internal/analysis/typeindex"
 	"golang.org/x/tools/internal/astutil"
 	"golang.org/x/tools/internal/goplsexport"
 	"golang.org/x/tools/internal/refactor"
@@ -26,7 +26,7 @@ import (
 
 var stditeratorsAnalyzer = &analysis.Analyzer{
 	Name: "stditerators",
-	Doc:  analysisinternal.MustExtractDoc(doc, "stditerators"),
+	Doc:  analyzerutil.MustExtractDoc(doc, "stditerators"),
 	Requires: []*analysis.Analyzer{
 		generated.Analyzer,
 		typeindexanalyzer.Analyzer,
@@ -313,7 +313,7 @@ func stditerators(pass *analysis.Pass) (any, error) {
 			// may be somewhat expensive.)
 			if v, ok := methodGoVersion(row.pkgpath, row.typename, row.itermethod); !ok {
 				panic("no version found")
-			} else if file := astutil.EnclosingFile(curLenCall); !fileUses(info, file, v.String()) {
+			} else if !analyzerutil.FileUsesGoVersion(pass, astutil.EnclosingFile(curLenCall), v.String()) {
 				continue nextCall
 			}
 

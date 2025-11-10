@@ -14,9 +14,9 @@ import (
 	"golang.org/x/tools/go/analysis/passes/inspect"
 	"golang.org/x/tools/go/ast/edge"
 	"golang.org/x/tools/go/types/typeutil"
-	"golang.org/x/tools/internal/analysisinternal"
-	"golang.org/x/tools/internal/analysisinternal/generated"
-	typeindexanalyzer "golang.org/x/tools/internal/analysisinternal/typeindex"
+	"golang.org/x/tools/internal/analysis/analyzerutil"
+	"golang.org/x/tools/internal/analysis/generated"
+	typeindexanalyzer "golang.org/x/tools/internal/analysis/typeindex"
 	"golang.org/x/tools/internal/astutil"
 	"golang.org/x/tools/internal/refactor"
 	"golang.org/x/tools/internal/typesinternal"
@@ -26,7 +26,7 @@ import (
 
 var ReflectTypeForAnalyzer = &analysis.Analyzer{
 	Name: "reflecttypefor",
-	Doc:  analysisinternal.MustExtractDoc(doc, "reflecttypefor"),
+	Doc:  analyzerutil.MustExtractDoc(doc, "reflecttypefor"),
 	Requires: []*analysis.Analyzer{
 		generated.Analyzer,
 		inspect.Analyzer,
@@ -89,7 +89,7 @@ func reflecttypefor(pass *analysis.Pass) (any, error) {
 		}
 
 		file := astutil.EnclosingFile(curCall)
-		if versions.Before(info.FileVersions[file], "go1.22") {
+		if !analyzerutil.FileUsesGoVersion(pass, file, versions.Go1_22) {
 			continue // TypeFor requires go1.22
 		}
 		tokFile := pass.Fset.File(file.Pos())

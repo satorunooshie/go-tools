@@ -15,7 +15,7 @@ import (
 	"golang.org/x/tools/go/ast/edge"
 	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/gopls/internal/util/moreslices"
-	"golang.org/x/tools/internal/analysisinternal"
+	"golang.org/x/tools/internal/analysis/analyzerutil"
 	"golang.org/x/tools/internal/astutil"
 	"golang.org/x/tools/internal/typesinternal"
 )
@@ -25,7 +25,7 @@ var doc string
 
 var Analyzer = &analysis.Analyzer{
 	Name:     "unusedparams",
-	Doc:      analysisinternal.MustExtractDoc(doc, "unusedparams"),
+	Doc:      analyzerutil.MustExtractDoc(doc, "unusedparams"),
 	Requires: []*analysis.Analyzer{inspect.Analyzer},
 	Run:      run,
 	URL:      "https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/unusedparams",
@@ -96,8 +96,7 @@ func run(pass *analysis.Pass) (any, error) {
 				// generics makes it tricky, and this conservative
 				// heuristic is close enough.)
 				t := pass.TypesInfo.TypeOf(n).(*types.Interface)
-				for i := 0; i < t.NumExplicitMethods(); i++ {
-					m := t.ExplicitMethod(i)
+				for m := range t.ExplicitMethods() {
 					if !m.Exported() && m.Name() != "_" {
 						unexportedIMethodNames[m.Name()] = true
 					}

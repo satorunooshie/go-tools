@@ -17,13 +17,14 @@ import (
 	"golang.org/x/tools/go/analysis/passes/inspect"
 	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/go/types/typeutil"
-	"golang.org/x/tools/internal/analysisinternal"
+	"golang.org/x/tools/internal/analysis/analyzerutil"
 	"golang.org/x/tools/internal/astutil"
+	"golang.org/x/tools/internal/versions"
 )
 
 var NewExprAnalyzer = &analysis.Analyzer{
 	Name:      "newexpr",
-	Doc:       analysisinternal.MustExtractDoc(doc, "newexpr"),
+	Doc:       analyzerutil.MustExtractDoc(doc, "newexpr"),
 	URL:       "https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/modernize#newexpr",
 	Requires:  []*analysis.Analyzer{inspect.Analyzer},
 	Run:       run,
@@ -60,7 +61,7 @@ func run(pass *analysis.Pass) (any, error) {
 
 								// Check file version.
 								file := astutil.EnclosingFile(curFuncDecl)
-								if !fileUses(info, file, "go1.26") {
+								if !analyzerutil.FileUsesGoVersion(pass, file, versions.Go1_26) {
 									continue // new(expr) not available in this file
 								}
 
@@ -133,7 +134,7 @@ func run(pass *analysis.Pass) (any, error) {
 
 			// Check file version.
 			file := astutil.EnclosingFile(curCall)
-			if !fileUses(info, file, "go1.26") {
+			if !analyzerutil.FileUsesGoVersion(pass, file, versions.Go1_26) {
 				continue // new(expr) not available in this file
 			}
 
