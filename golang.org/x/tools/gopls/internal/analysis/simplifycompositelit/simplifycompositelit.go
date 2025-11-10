@@ -19,7 +19,7 @@ import (
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/inspect"
 	"golang.org/x/tools/go/ast/inspector"
-	"golang.org/x/tools/internal/analysisinternal"
+	"golang.org/x/tools/internal/analysis/analyzerutil"
 )
 
 //go:embed doc.go
@@ -27,7 +27,7 @@ var doc string
 
 var Analyzer = &analysis.Analyzer{
 	Name:     "simplifycompositelit",
-	Doc:      analysisinternal.MustExtractDoc(doc, "simplifycompositelit"),
+	Doc:      analyzerutil.MustExtractDoc(doc, "simplifycompositelit"),
 	Requires: []*analysis.Analyzer{inspect.Analyzer},
 	Run:      run,
 	URL:      "https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/simplifycompositelit",
@@ -198,8 +198,8 @@ func match(pattern, val reflect.Value) bool {
 
 // Values/types for special cases.
 var (
-	identType     = reflect.TypeOf((*ast.Ident)(nil))
-	objectPtrType = reflect.TypeOf((*ast.Object)(nil))
-	positionType  = reflect.TypeOf(token.NoPos)
-	callExprType  = reflect.TypeOf((*ast.CallExpr)(nil))
+	identType     = reflect.TypeFor[*ast.Ident]()
+	objectPtrType = reflect.TypeFor[*ast.Object]()
+	positionType  = reflect.TypeFor[token.Pos]()
+	callExprType  = reflect.TypeFor[*ast.CallExpr]()
 )

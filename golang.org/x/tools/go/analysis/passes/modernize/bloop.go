@@ -15,18 +15,19 @@ import (
 	"golang.org/x/tools/go/analysis/passes/inspect"
 	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/go/types/typeutil"
-	"golang.org/x/tools/internal/analysisinternal"
-	"golang.org/x/tools/internal/analysisinternal/generated"
-	typeindexanalyzer "golang.org/x/tools/internal/analysisinternal/typeindex"
+	"golang.org/x/tools/internal/analysis/analyzerutil"
+	"golang.org/x/tools/internal/analysis/generated"
+	typeindexanalyzer "golang.org/x/tools/internal/analysis/typeindex"
 	"golang.org/x/tools/internal/astutil"
 	"golang.org/x/tools/internal/moreiters"
 	"golang.org/x/tools/internal/typesinternal"
 	"golang.org/x/tools/internal/typesinternal/typeindex"
+	"golang.org/x/tools/internal/versions"
 )
 
 var BLoopAnalyzer = &analysis.Analyzer{
 	Name: "bloop",
-	Doc:  analysisinternal.MustExtractDoc(doc, "bloop"),
+	Doc:  analyzerutil.MustExtractDoc(doc, "bloop"),
 	Requires: []*analysis.Analyzer{
 		generated.Analyzer,
 		inspect.Analyzer,
@@ -52,9 +53,8 @@ func bloop(pass *analysis.Pass) (any, error) {
 	}
 
 	var (
-		inspect = pass.ResultOf[inspect.Analyzer].(*inspector.Inspector)
-		index   = pass.ResultOf[typeindexanalyzer.Analyzer].(*typeindex.Index)
-		info    = pass.TypesInfo
+		index = pass.ResultOf[typeindexanalyzer.Analyzer].(*typeindex.Index)
+		info  = pass.TypesInfo
 	)
 
 	// edits computes the text edits for a matched for/range loop
@@ -102,7 +102,7 @@ func bloop(pass *analysis.Pass) (any, error) {
 		(*ast.ForStmt)(nil),
 		(*ast.RangeStmt)(nil),
 	}
-	for curFile := range filesUsing(inspect, info, "go1.24") {
+	for curFile := range filesUsingGoVersion(pass, versions.Go1_24) {
 		for curLoop := range curFile.Preorder(loops...) {
 			switch n := curLoop.Node().(type) {
 			case *ast.ForStmt:

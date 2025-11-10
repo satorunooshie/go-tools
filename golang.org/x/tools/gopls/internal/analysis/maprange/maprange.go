@@ -13,9 +13,8 @@ import (
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/ast/edge"
 	"golang.org/x/tools/go/ast/inspector"
-	"golang.org/x/tools/gopls/internal/util/cursorutil"
-	"golang.org/x/tools/internal/analysisinternal"
-	typeindexanalyzer "golang.org/x/tools/internal/analysisinternal/typeindex"
+	"golang.org/x/tools/internal/analysis/analyzerutil"
+	typeindexanalyzer "golang.org/x/tools/internal/analysis/typeindex"
 	"golang.org/x/tools/internal/astutil"
 	"golang.org/x/tools/internal/typesinternal/typeindex"
 	"golang.org/x/tools/internal/versions"
@@ -26,7 +25,7 @@ var doc string
 
 var Analyzer = &analysis.Analyzer{
 	Name:     "maprange",
-	Doc:      analysisinternal.MustExtractDoc(doc, "maprange"),
+	Doc:      analyzerutil.MustExtractDoc(doc, "maprange"),
 	URL:      "https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/maprange",
 	Requires: []*analysis.Analyzer{typeindexanalyzer.Analyzer},
 	Run:      run,
@@ -90,9 +89,9 @@ func analyzeRangeStmt(pass *analysis.Pass, callee types.Object, curCall inspecto
 	if pkg == xmaps && isSet(rangeStmt.Key) && rangeStmt.Value == nil {
 		// If we have:   for i := range maps.Keys(m) (using x/exp/maps),
 		// Replace with: for i := range len(m)
+		// (This requires Go 1.22.)
 		replace = "len"
-		canRangeOverInt := fileUses(pass.TypesInfo, curCall, "go1.22")
-		if !canRangeOverInt {
+		if !analyzerutil.FileUsesGoVersion(pass, astutil.EnclosingFile(curCall), versions.Go1_22) {
 			pass.Report(analysis.Diagnostic{
 				Pos:     call.Pos(),
 				End:     call.End(),
@@ -148,11 +147,4 @@ func analyzeRangeStmt(pass *analysis.Pass, callee types.Object, curCall inspecto
 func isSet(expr ast.Expr) bool {
 	ident, ok := expr.(*ast.Ident)
 	return expr != nil && (!ok || ident.Name != "_")
-}
-
-// fileUses reports whether the file containing the specified cursor
-// uses at least the specified version of Go (e.g. "go1.24").
-func fileUses(info *types.Info, c inspector.Cursor, version string) bool {
-	file, _ := cursorutil.FirstEnclosing[*ast.File](c)
-	return !versions.Before(info.FileVersions[file], version)
 }

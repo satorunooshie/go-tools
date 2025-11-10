@@ -15,17 +15,18 @@ import (
 	"golang.org/x/tools/go/analysis/passes/inspect"
 	"golang.org/x/tools/go/ast/edge"
 	"golang.org/x/tools/go/ast/inspector"
-	"golang.org/x/tools/internal/analysisinternal"
-	"golang.org/x/tools/internal/analysisinternal/generated"
-	typeindexanalyzer "golang.org/x/tools/internal/analysisinternal/typeindex"
+	"golang.org/x/tools/internal/analysis/analyzerutil"
+	"golang.org/x/tools/internal/analysis/generated"
+	typeindexanalyzer "golang.org/x/tools/internal/analysis/typeindex"
 	"golang.org/x/tools/internal/astutil"
 	"golang.org/x/tools/internal/typeparams"
 	"golang.org/x/tools/internal/typesinternal/typeindex"
+	"golang.org/x/tools/internal/versions"
 )
 
 var MinMaxAnalyzer = &analysis.Analyzer{
 	Name: "minmax",
-	Doc:  analysisinternal.MustExtractDoc(doc, "minmax"),
+	Doc:  analyzerutil.MustExtractDoc(doc, "minmax"),
 	Requires: []*analysis.Analyzer{
 		generated.Analyzer,
 		inspect.Analyzer,
@@ -201,8 +202,7 @@ func minmax(pass *analysis.Pass) (any, error) {
 
 	// Find all "if a < b { lhs = rhs }" statements.
 	info := pass.TypesInfo
-	inspect := pass.ResultOf[inspect.Analyzer].(*inspector.Inspector)
-	for curFile := range filesUsing(inspect, info, "go1.21") {
+	for curFile := range filesUsingGoVersion(pass, versions.Go1_21) {
 		astFile := curFile.Node().(*ast.File)
 		for curIfStmt := range curFile.Preorder((*ast.IfStmt)(nil)) {
 			ifStmt := curIfStmt.Node().(*ast.IfStmt)

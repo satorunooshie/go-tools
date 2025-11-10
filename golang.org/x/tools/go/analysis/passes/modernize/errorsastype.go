@@ -14,19 +14,20 @@ import (
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/ast/edge"
 	"golang.org/x/tools/go/ast/inspector"
-	"golang.org/x/tools/internal/analysisinternal"
-	"golang.org/x/tools/internal/analysisinternal/generated"
-	typeindexanalyzer "golang.org/x/tools/internal/analysisinternal/typeindex"
+	"golang.org/x/tools/internal/analysis/analyzerutil"
+	"golang.org/x/tools/internal/analysis/generated"
+	typeindexanalyzer "golang.org/x/tools/internal/analysis/typeindex"
 	"golang.org/x/tools/internal/astutil"
 	"golang.org/x/tools/internal/goplsexport"
 	"golang.org/x/tools/internal/refactor"
 	"golang.org/x/tools/internal/typesinternal"
 	"golang.org/x/tools/internal/typesinternal/typeindex"
+	"golang.org/x/tools/internal/versions"
 )
 
 var errorsastypeAnalyzer = &analysis.Analyzer{
 	Name:     "errorsastype",
-	Doc:      analysisinternal.MustExtractDoc(doc, "errorsastype"),
+	Doc:      analyzerutil.MustExtractDoc(doc, "errorsastype"),
 	URL:      "https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/modernize#errorsastype",
 	Requires: []*analysis.Analyzer{generated.Analyzer, typeindexanalyzer.Analyzer},
 	Run:      errorsastype,
@@ -97,7 +98,7 @@ func errorsastype(pass *analysis.Pass) (any, error) {
 		}
 
 		file := astutil.EnclosingFile(curDeclStmt)
-		if !fileUses(info, file, "go1.26") {
+		if !analyzerutil.FileUsesGoVersion(pass, file, versions.Go1_26) {
 			continue // errors.AsType is too new
 		}
 
