@@ -15,7 +15,6 @@ import (
 	"golang.org/x/tools/go/ast/edge"
 	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/internal/analysis/analyzerutil"
-	"golang.org/x/tools/internal/analysis/generated"
 	typeindexanalyzer "golang.org/x/tools/internal/analysis/typeindex"
 	"golang.org/x/tools/internal/astutil"
 	"golang.org/x/tools/internal/goplsexport"
@@ -29,7 +28,7 @@ var errorsastypeAnalyzer = &analysis.Analyzer{
 	Name:     "errorsastype",
 	Doc:      analyzerutil.MustExtractDoc(doc, "errorsastype"),
 	URL:      "https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/modernize#errorsastype",
-	Requires: []*analysis.Analyzer{generated.Analyzer, typeindexanalyzer.Analyzer},
+	Requires: []*analysis.Analyzer{typeindexanalyzer.Analyzer},
 	Run:      errorsastype,
 }
 
@@ -79,8 +78,6 @@ func init() {
 //
 // - if errors.As(err, myerr) && othercond { ... }
 func errorsastype(pass *analysis.Pass) (any, error) {
-	skipGenerated(pass)
-
 	var (
 		index = pass.ResultOf[typeindexanalyzer.Analyzer].(*typeindex.Index)
 		info  = pass.TypesInfo
@@ -128,6 +125,8 @@ func errorsastype(pass *analysis.Pass) (any, error) {
 		errtype := types.TypeString(v.Type(), qual)
 
 		// Choose a name for the "ok" variable.
+		// TODO(adonovan): this pattern also appears in stditerators,
+		// and is wanted elsewhere; factor.
 		okName := "ok"
 		if okVar := lookup(info, curCall, "ok"); okVar != nil {
 			// The name 'ok' is already declared, but
