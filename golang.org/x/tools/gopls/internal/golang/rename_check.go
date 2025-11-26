@@ -33,6 +33,7 @@ package golang
 //   method, not the concrete method.
 
 import (
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/build"
@@ -50,7 +51,6 @@ import (
 	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/gopls/internal/cache"
 	"golang.org/x/tools/gopls/internal/file"
-	"golang.org/x/tools/gopls/internal/settings"
 	"golang.org/x/tools/gopls/internal/util/safetoken"
 	"golang.org/x/tools/internal/typeparams"
 	"golang.org/x/tools/internal/typesinternal"
@@ -922,11 +922,19 @@ func isValidIdentifier(id string) bool {
 // resulting from renaming the current package to newName, which may be an
 // identifier or a package path. An error is returned if the renaming is
 // invalid.
-func checkPackageRename(opts *settings.Options, curPkg *cache.Package, f file.Handle, newName string) (newPkgDir string, newPkgName PackageName, newPkgPath PackagePath, err error) {
+func checkPackageRename(curPkg *cache.Package, f file.Handle, newName string, moveSubpackages bool) (newPkgDir string, newPkgName PackageName, newPkgPath PackagePath, err error) {
 	// Path unchanged
 	if newName == curPkg.String() || newName == string(curPkg.Metadata().Name) {
 		return f.URI().DirPath(), curPkg.Metadata().Name, curPkg.Metadata().PkgPath, nil
 	}
+
+	// If there are any Go files in the package that are not in the compiled package
+	// with the current build config, we should not allow a package move.
+	ignored := hasIgnoredGoFiles(curPkg)
+	if ignored {
+		return "", "", "", fmt.Errorf("moving a package with ignored files is not supported")
+	}
+
 	// TODO(mkalil): support relative paths
 	if build.IsLocalImport(newName) {
 		return "", "", "", fmt.Errorf("specifying relative paths in package rename not yet supported")
@@ -940,18 +948,19 @@ func checkPackageRename(opts *settings.Options, curPkg *cache.Package, f file.Ha
 		// path, in which case we should not allow renaming.
 		root := filepath.Dir(f.URI().DirPath())
 		newPkgDir = filepath.Join(root, newName)
-		_, err := os.Stat(newPkgDir)
-		if err == nil {
-			// Directory already exists, return an error.
-			return "", "", "", fmt.Errorf("invalid package identifier: %q already exists", newName)
+		exists, empty, err := dirIsEmpty(newPkgDir)
+		if err != nil {
+			return "", "", "", err
+		}
+		// When rename moves subpackages, we merely change the directory name, which cannot
+		// happen if the target directory already exists.
+		if moveSubpackages && exists || !empty {
+			return "", "", "", fmt.Errorf("invalid package identifier: %q is not empty", newPkgDir)
 		}
 		parentPkgPath := strings.TrimSuffix(string(curPkg.Metadata().PkgPath), string(curPkg.Metadata().Name)) // leaves a trailing slash
 		newPkgPath = PackagePath(parentPkgPath + newName)
 		newPkgName = PackageName(newName)
 		return newPkgDir, newPkgName, newPkgPath, nil
-	}
-	if !opts.PackageMove {
-		return "", "", "", fmt.Errorf("a full package path is specified but internal setting 'packageMove' is not enabled")
 	}
 	// Don't allow moving packages across module boundaries.
 	curModPath := curPkg.Metadata().Module.Path
@@ -969,16 +978,55 @@ func checkPackageRename(opts *settings.Options, curPkg *cache.Package, f file.Ha
 		return "", "", "", fmt.Errorf("invalid package path %q", newName)
 	}
 	newPkgName = PackageName(filepath.Base(newPkgDir))
-	_, err = os.Stat(newPkgDir)
-	if err == nil {
-		// Directory or file already exists at this path; return an error.
-		return "", "", "", fmt.Errorf("invalid package path: %q already exists", newName)
+	exists, empty, err := dirIsEmpty(newPkgDir)
+	if err != nil {
+		return "", "", "", err
+	}
+	// When rename moves subpackages, we merely change the directory name, which cannot
+	// happen if the target directory already exists.
+	if moveSubpackages && exists || !empty {
+		return "", "", "", fmt.Errorf("invalid package path: %q is not empty", newPkgDir)
 	}
 	// Verify that the new package name is a valid identifier.
 	if !isValidIdentifier(string(newPkgName)) {
 		return "", "", "", fmt.Errorf("invalid package name %q", newPkgName)
 	}
+	if f.URI().Dir().Base() != string(curPkg.Metadata().Name) {
+		return "", "", "", fmt.Errorf("can't move package: package name %q does not match directory base name %q", string(curPkg.Metadata().Name), f.URI().Dir().Base())
+	}
 	return newPkgDir, newPkgName, PackagePath(newName), nil
+}
+
+// hasIgnoredGoFiles returns true if the input pkg contains any Go files that
+// are not part of package pkg with the current build configuration.
+func hasIgnoredGoFiles(pkg *cache.Package) bool {
+	// If any ignored files are Go files, don't allow a package move.
+	for _, f := range pkg.Metadata().IgnoredFiles {
+		if strings.HasSuffix(f.Path(), ".go") {
+			return true
+		}
+	}
+	return false
+}
+
+// dirIsEmpty returns two values: whether the directory exists and whether it is
+// empty (contains only directory entries). If it does not exist, empty is
+// always true.
+func dirIsEmpty(dir string) (exists bool, empty bool, err error) {
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, true, nil
+		} else {
+			return false, false, err
+		}
+	}
+	for _, f := range files {
+		if !f.IsDir() {
+			return true, false, nil
+		}
+	}
+	return true, true, nil
 }
 
 // isLocal reports whether obj is local to some function.
