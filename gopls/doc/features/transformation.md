@@ -339,8 +339,23 @@ Special cases:
     Rename here to affect all methods
   ```
 
-- Renaming a package declaration additionally causes the package's
-  directory to be renamed.
+Using Rename to move a package:
+To rename a package, execute the Rename operation over the `p` in a
+`package p` declaration at the start of a file.
+You will be prompted to edit the package's path and choose its new location.
+The Rename operation will move all the package's files to the resulting directory,
+creating it if necessary.
+By default, subpackages will remain where they are. To include subpackages
+in the renaming, set [renameMovesSubpackages](../settings.md#renamemovessubpackages-bool) to true.
+Existing imports of the package will be updated to reflect its new path.
+
+Package moves are rejected if they would break the build. For example:
+- Packages cannot move across a module boundary.
+- Packages cannot be moved into existing packages; gopls does not support package merging.
+- Packages cannot be moved to internal directories that would make them inaccessible to any of their current importers.
+
+Renaming package main is not supported, because the main package has special meaning to the linker.
+Renaming x_test packages is currently not supported.
 
 Some tips for best results:
 
