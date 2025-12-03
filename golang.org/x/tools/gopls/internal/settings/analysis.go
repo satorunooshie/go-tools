@@ -271,6 +271,7 @@ var DefaultAnalyzers = addCustomAnalyzers([]*Analyzer{
 	{analyzer: modernize.StringsCutPrefixAnalyzer, severity: protocol.SeverityHint},
 	{analyzer: modernize.StringsSeqAnalyzer, severity: protocol.SeverityHint},
 	{analyzer: modernize.TestingContextAnalyzer, severity: protocol.SeverityHint},
+	{analyzer: goplsexport.UnsafeFuncsModernizer, severity: protocol.SeverityHint},
 	{analyzer: modernize.WaitGroupAnalyzer, severity: protocol.SeverityHint},
 
 	// type-error analyzers
