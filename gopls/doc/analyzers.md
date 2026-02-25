@@ -4037,9 +4037,9 @@ is replaced by:
 
 This avoids quadratic memory allocation and improves performance.
 
-The analyzer requires that all references to s except the final one are += operations. To avoid warning about trivial cases, at least one must appear within a loop. The variable s must be a local variable, not a global or parameter.
+The analyzer requires that all references to s before the final uses are += operations. To avoid warning about trivial cases, at least one must appear within a loop. The variable s must be a local variable, not a global or parameter.
 
-The sole use of the finished string must be the last reference to the variable s. (It may appear within an intervening loop or function literal, since even s.String() is called repeatedly, it does not allocate memory.)
+All uses of the finished string must come after the last += operation. Each such use will be replaced by a call to strings.Builder's String method. (These may appear within an intervening loop or function literal, since even if s.String() is called repeatedly, it does not allocate memory.)
 
 Often the addend is a call to fmt.Sprintf, as in this example:
 
@@ -4423,6 +4423,35 @@ which was added in Go 1.25.
 Default: on.
 
 Package documentation: [waitgroup](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/modernize#waitgroup)
+
+<a id='writestring'></a>
+## `writestring`: detect inefficient string concatenation in uses of WriteString
+
+The writestring analyzer offers to replace a call to WriteString(x + y) by two calls WriteString(x); WriteString(y). This is more efficient because it avoids the additional memory allocation produced by string concatenation; instead we just write each string into the buffer directly.
+
+It explicitly looks for calls to certain well-known writers such as bytes.Buffer, strings.Builder and bufio.Writer. The analyzer will not suggest a fix for calls to, say, (\*os.File).WriteString, because for certain kinds of file such as a UDP socket, it could split a single message into two. Similarly it does not offer fixes when the type of the writer is unknown (as in calls to io.WriteString).
+
+For example:
+
+	func f(a string, b string) string {
+		 var s strings.Builder
+		 s.WriteString(a+b)
+		 return s.String()
+	}
+
+would become:
+
+	func f(a string, b string) string {
+		var s strings.Builder
+		s.WriteString(a)
+		s.WriteString(b)
+		return s.String()
+	}
+
+
+Default: on.
+
+Package documentation: [writestring](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/writestring)
 
 <a id='yield'></a>
 ## `yield`: report calls to yield where the result is ignored
