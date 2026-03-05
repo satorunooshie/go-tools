@@ -275,6 +275,7 @@ var DefaultAnalyzers = addCustomAnalyzers([]*Analyzer{
 	{analyzer: modernize.TestingContextAnalyzer, severity: protocol.SeverityHint},
 	{analyzer: goplsexport.UnsafeFuncsModernizer, severity: protocol.SeverityHint},
 	{analyzer: modernize.WaitGroupAnalyzer, severity: protocol.SeverityHint},
+	{analyzer: goplsexport.AtomicModernizer, severity: protocol.SeverityHint},
 
 	// type-error analyzers
 	// These analyzers enrich go/types errors with suggested fixes.
