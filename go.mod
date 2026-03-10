@@ -1,6 +1,6 @@
 module github.com/satorunooshie/go-tools
 
-go 1.25.0
+go 1.26
 
 replace golang.org/x/tools => ./golang.org/x/tools
 
