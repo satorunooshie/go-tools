@@ -17,8 +17,8 @@ func TestAppendClipped(t *testing.T) {
 	RunWithSuggestedFixes(t, TestData(), modernize.AppendClippedAnalyzer, "appendclipped")
 }
 
-func TestAtomic(t *testing.T) {
-	RunWithSuggestedFixes(t, TestData(), goplsexport.AtomicModernizer, "atomic/...")
+func TestAtomicTypes(t *testing.T) {
+	RunWithSuggestedFixes(t, TestData(), goplsexport.AtomicTypesModernizer, "atomictypes/...")
 }
 func TestBloop(t *testing.T) {
 	RunWithSuggestedFixes(t, TestData(), modernize.BLoopAnalyzer, "bloop")
@@ -125,6 +125,6 @@ func TestUnsafeFuncs(t *testing.T) {
 	RunWithSuggestedFixes(t, TestData(), goplsexport.UnsafeFuncsModernizer, "unsafefuncs")
 }
 
-func TestWaitGroup(t *testing.T) {
-	RunWithSuggestedFixes(t, TestData(), modernize.WaitGroupAnalyzer, "waitgroup")
+func TestWaitGroupGo(t *testing.T) {
+	RunWithSuggestedFixes(t, TestData(), modernize.WaitGroupGoAnalyzer, "waitgroupgo")
 }

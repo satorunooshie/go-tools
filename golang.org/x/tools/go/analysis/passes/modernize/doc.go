@@ -65,11 +65,11 @@ This analyzer is currently disabled by default as the
 transformation does not preserve the nilness of the base slice in
 all cases; see https://go.dev/issue/73557.
 
-# Analyzer atomic
+# Analyzer atomictypes
 
-atomic: replace basic types in sync/atomic calls with atomic types
+atomictypes: replace basic types in sync/atomic calls with atomic types
 
-The atomic analyzer suggests replacing the primitive sync/atomic functions with
+The atomictypes analyzer suggests replacing the primitive sync/atomic functions with
 the strongly typed atomic wrapper types introduced in Go1.19 (e.g.
 atomic.Int32). For example,
 
@@ -544,11 +544,11 @@ where ptr is an unsafe.Pointer, is replaced by:
 
 	unsafe.Add(ptr, n)
 
-# Analyzer waitgroup
+# Analyzer waitgroupgo
 
-waitgroup: replace wg.Add(1)/go/wg.Done() with wg.Go
+waitgroupgo: replace wg.Add(1)/go/wg.Done() with wg.Go
 
-The waitgroup analyzer simplifies goroutine management with `sync.WaitGroup`.
+The waitgroupgo analyzer simplifies goroutine management with `sync.WaitGroup`.
 It replaces the common pattern
 
 	wg.Add(1)

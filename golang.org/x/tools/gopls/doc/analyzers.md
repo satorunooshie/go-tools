@@ -2924,26 +2924,6 @@ Default: on.
 Package documentation: [assign](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/assign)
 
 <a id='atomic'></a>
-## `atomic`: replace basic types in sync/atomic calls with atomic types
-
-The atomic analyzer suggests replacing the primitive sync/atomic functions with the strongly typed atomic wrapper types introduced in Go1.19 (e.g. atomic.Int32). For example,
-
-	var x int32
-	atomic.AddInt32(&x, 1)
-
-would become
-
-	var x atomic.Int32
-	x.Add(1)
-
-The atomic types are safer because they don't allow non-atomic access, which is a common source of bugs. These types also resolve memory alignment issues that plagued the old atomic functions on 32-bit architectures.
-
-
-Default: on.
-
-Package documentation: [atomic](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/modernize#atomic)
-
-<a id='atomic'></a>
 ## `atomic`: check for common mistakes using the sync/atomic package
 
 The atomic checker looks for assignment statements of the form:
@@ -2965,6 +2945,26 @@ Package documentation: [atomic](https://pkg.go.dev/golang.org/x/tools/go/analysi
 Default: on.
 
 Package documentation: [atomicalign](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/atomicalign)
+
+<a id='atomictypes'></a>
+## `atomictypes`: replace basic types in sync/atomic calls with atomic types
+
+The atomictypes analyzer suggests replacing the primitive sync/atomic functions with the strongly typed atomic wrapper types introduced in Go1.19 (e.g. atomic.Int32). For example,
+
+	var x int32
+	atomic.AddInt32(&x, 1)
+
+would become
+
+	var x atomic.Int32
+	x.Add(1)
+
+The atomic types are safer because they don't allow non-atomic access, which is a common source of bugs. These types also resolve memory alignment issues that plagued the old atomic functions on 32-bit architectures.
+
+
+Default: on.
+
+Package documentation: [atomictypes](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/modernize#atomictypes)
 
 <a id='bloop'></a>
 ## `bloop`: replace for-range over b.N with b.Loop
@@ -3142,6 +3142,37 @@ The fix is only offered if the var declaration has the form shown and there are 
 Default: on.
 
 Package documentation: [errorsastype](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/modernize#errorsastype)
+
+<a id='fieldalignment'></a>
+## `fieldalignment`: find structs that would use less memory if their fields were sorted
+
+This analyzer finds structs that can be rearranged to use less memory, and provides a suggested edit with the most compact order.
+
+Note that there are two different diagnostics reported. One checks struct size, and the other reports "pointer bytes" used. Pointer bytes is how many bytes of the object that the garbage collector has to potentially scan for pointers, for example:
+
+	struct { uint32; string }
+
+have 16 pointer bytes because the garbage collector has to scan up through the string's inner pointer.
+
+	struct { string; *uint32 }
+
+has 24 pointer bytes because it has to scan further through the \*uint32.
+
+	struct { string; uint32 }
+
+has 8 because it can stop immediately after the string pointer.
+
+Be aware that the most compact order is not always the most efficient. In rare cases it may cause two variables each updated by its own goroutine to occupy the same CPU cache line, inducing a form of memory contention known as "false sharing" that slows down both goroutines.
+
+Unlike most analyzers, which report likely mistakes, the diagnostics produced by fieldanalyzer very rarely indicate a significant problem, so the analyzer is not included in typical suites such as vet or gopls. Use this standalone command to run it on your code:
+
+	$ go install golang.org/x/tools/go/analysis/passes/fieldalignment/cmd/fieldalignment@latest
+	$ fieldalignment [packages]
+
+
+Default: off. Enable by setting `"analyses": {"fieldalignment": true}`.
+
+Package documentation: [fieldalignment](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/fieldalignment)
 
 <a id='fillreturns'></a>
 ## `fillreturns`: suggest fixes for errors due to an incorrect number of return values
@@ -4427,10 +4458,10 @@ Default: on.
 
 Package documentation: [waitgroup](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/waitgroup)
 
-<a id='waitgroup'></a>
-## `waitgroup`: replace wg.Add(1)/go/wg.Done() with wg.Go
+<a id='waitgroupgo'></a>
+## `waitgroupgo`: replace wg.Add(1)/go/wg.Done() with wg.Go
 
-The waitgroup analyzer simplifies goroutine management with \`sync.WaitGroup\`. It replaces the common pattern
+The waitgroupgo analyzer simplifies goroutine management with \`sync.WaitGroup\`. It replaces the common pattern
 
 	wg.Add(1)
 	go func() {
@@ -4447,7 +4478,7 @@ which was added in Go 1.25.
 
 Default: on.
 
-Package documentation: [waitgroup](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/modernize#waitgroup)
+Package documentation: [waitgroupgo](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/modernize#waitgroupgo)
 
 <a id='writestring'></a>
 ## `writestring`: detect inefficient string concatenation in uses of WriteString
