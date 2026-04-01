@@ -7,11 +7,13 @@ package server
 import (
 	"context"
 	"fmt"
+	"go/token"
 	"slices"
-	"strings"
 
+	"golang.org/x/mod/module"
 	"golang.org/x/tools/gopls/internal/protocol"
 	"golang.org/x/tools/gopls/internal/protocol/command"
+	"golang.org/x/tools/gopls/internal/util/morestrings"
 )
 
 // Ths file contains the code to mediate user dialogs in the client
@@ -29,10 +31,9 @@ import (
 // 5. Client return ApplyWorkspaceEditResult with applied = true
 // 6. Client sends a textDocument/didChange notification, with the edits applied (optional)
 
-// In vscode-go, because it is a standard LSP client,
-// cannot do step 4 as described. Instead
-// it calls "workspace/executeCommand" with command 'gopls.lsp'
-// and parameter.Method "command/resolve".
+// In vscode-go, because it is a standard LSP client, cannot do step 4 as
+// described. Instead it calls "workspace/executeCommand" with command
+// 'gopls.lsp' and parameter.Method "command/resolve".
 //
 // ExecuteCommand() calls command.Dispatch() which calls LSP()
 // which calls protocol.ServerDispatchCall("command/resolve")
@@ -53,34 +54,24 @@ var AddTagsForm = []protocol.FormField{
 			Kind: "enum",
 			Entries: []protocol.FormEnumEntry{
 				{
-					// MyField -> myField
 					Value:       "camelcase",
-					Description: "camelcase",
+					Description: "camelCase",
 				},
 				{
-					// MyField -> my-field
 					Value:       "lispcase",
-					Description: "lispcase",
+					Description: "lisp-case",
 				},
 				{
-					// MyField -> MyField
 					Value:       "pascalcase",
-					Description: "pascalcase",
+					Description: "PascalCase",
 				},
 				{
-					// MyField -> My Field
 					Value:       "titlecase",
-					Description: "titlecase",
+					Description: "Title Case",
 				},
 				{
-					// MyField -> my_field
 					Value:       "snakecase",
-					Description: "snakecase",
-				},
-				{
-					// keep the existing field name
-					Value:       "keep",
-					Description: "keep",
+					Description: "snake_case",
 				},
 			},
 		},
@@ -100,77 +91,146 @@ var RemoveTagsForm = []protocol.FormField{
 func (s *server) ResolveCommand(ctx context.Context, param *protocol.ExecuteCommandParams) (*protocol.ExecuteCommandParams, error) {
 	switch param.Command {
 	case "gopls.modify_tags":
-		return resolveModifyTags(param)
+		resolveModifyTags(param)
+	case "gopls.implement_interface":
+		resolveImplementInterface(param)
+	default:
+		return nil, notImplemented(fmt.Sprintf("ResolveCommand(%s)", param.Command))
 	}
-	return nil, notImplemented(fmt.Sprintf("ResolveCommand(%s)", param.Command))
+	return param, nil
 }
 
-func resolveModifyTags(param *protocol.ExecuteCommandParams) (*protocol.ExecuteCommandParams, error) {
+func resolveModifyTags(param *protocol.ExecuteCommandParams) error {
 	var a0 command.ModifyTagsArgs
 	if err := command.UnmarshalArgs(param.Arguments, &a0); err != nil {
-		return nil, err
+		return err
 	}
 	switch a0.Modification {
 	case "add":
-		switch len(param.FormAnswers) {
-		case 0: // first call, return the form
+		// First call, return the form.
+		if len(param.FormAnswers) == 0 {
 			param.FormFields = AddTagsForm
-			return param, nil
-		case 2: // second call, process the form
-			var ok bool
-			if a0.Add, ok = param.FormAnswers[0].(string); !ok {
-				return nil, fmt.Errorf("invalid type of first value, want string: %v", param.FormAnswers[0])
-			}
-
-			if slices.Contains(strings.Split(a0.Add, ","), "") {
-				// TODO(pjw): instead filter AddTagsForm to remove empty tags and tags containing spaces
-				form := slices.Clone(AddTagsForm)
-				form[0].Error = "input tags should not contain empty tag"
-				param.FormFields = form
-				return param, nil
-			}
-
-			if a0.Transform, ok = param.FormAnswers[1].(string); !ok {
-				return nil, fmt.Errorf("invalid type of second value, want string: %v", param.FormAnswers[1])
-			}
-			// PJW: what happens when the user enters a bad value? (i think the client handles it)
-
-			raw, err := command.MarshalArgs(a0)
-			if err != nil {
-				return nil, err
-			}
-
-			param.FormAnswers = nil
-			param.FormFields = nil
-			param.Arguments = raw
-			return param, nil
-		default:
-			return nil, fmt.Errorf("modify tags command expecting 1 value from client, got %v", len(param.FormAnswers))
+			return nil
 		}
+
+		// User parameter 0.
+		v0, err := formAnswer[string](&param.InteractiveParams, 0)
+		if err != nil {
+			return err
+		}
+		if _, err = sanitizeTags(v0); err != nil {
+			form := slices.Clone(AddTagsForm)
+			form[0].Error = err.Error()
+			param.FormFields = form
+			return nil
+		}
+
+		// User parameter 1.
+		_, err = formAnswer[string](&param.InteractiveParams, 1)
+		if err != nil {
+			return err
+		}
+		// PJW: what happens when the user enters a bad value? (i think the client handles it)
+
+		param.FormFields = nil
+		return nil
 	case "remove":
-		switch len(param.FormAnswers) {
-		case 0: // first call, return the form
+		// First call, return the form
+		if len(param.FormAnswers) == 0 {
 			// TODO? show the user the current list of tags?
 			param.FormFields = RemoveTagsForm
-			return param, nil
-		case 1: // second call, process the form
-			var ok bool
-			if a0.Remove, ok = param.FormAnswers[0].(string); !ok {
-				return nil, fmt.Errorf("invalid type of value, want string: %v", param.FormAnswers[0])
-			}
-			raw, err := command.MarshalArgs(a0)
-			if err != nil {
-				return nil, err
-			}
-
-			param.FormAnswers = nil
-			param.FormFields = nil
-			param.Arguments = raw
-			return param, nil
-		default:
-			return nil, fmt.Errorf("modify tags command expecting 1 value from client, got %v", len(param.FormAnswers))
+			return nil
 		}
+
+		v, err := formAnswer[string](&param.InteractiveParams, 0)
+		if err != nil {
+			return err
+		}
+		if _, err := sanitizeTags(v); err != nil {
+			form := slices.Clone(AddTagsForm)
+			form[0].Error = err.Error()
+			param.FormFields = form
+			return nil
+		}
+
+		param.FormFields = nil
+		return nil
 	default:
-		return nil, fmt.Errorf("unsupported modify tags operation: %s", a0.Modification)
+		return fmt.Errorf("unsupported modify tags operation: %s", a0.Modification)
 	}
+}
+
+var implementInterfaceForm = []protocol.FormField{
+	{
+		// TODO(hxjiang): replace form field with lazy resolving enum.
+		Description: `fully qualified interface identifier path/to/pkg.interface; e.g., "net.Error"`,
+		Type:        protocol.FormFieldTypeString{Kind: "string"},
+		Default:     "error",
+	},
+}
+
+func resolveImplementInterface(param *protocol.ExecuteCommandParams) error {
+	var a0 command.ImplementInterfaceArgs
+	if err := command.UnmarshalArgs(param.Arguments, &a0); err != nil {
+		return err
+	}
+
+	// First call, return the empty form.
+	if len(param.FormAnswers) == 0 {
+		param.FormFields = implementInterfaceForm
+		return nil
+	}
+
+	v, err := formAnswer[string](&param.InteractiveParams, 0)
+	if err != nil {
+		return err
+	}
+
+	// Gopls only validates the syntax of the string; it does not verify that
+	// the package or interface actually exists in the workspace.
+	var validInterface = func(ifaceStr string) error {
+		if ifaceStr == "error" {
+			return nil
+		}
+		pkgPath, ifaceName, ok := morestrings.CutLast(ifaceStr, ".")
+		if !ok {
+			return fmt.Errorf(`invalid interface type name: want string of form "example.com/pkg.Type", got %q`, ifaceStr)
+		}
+
+		if err := module.CheckImportPath(pkgPath); err != nil {
+			return fmt.Errorf("invalid package path %w", err)
+		}
+
+		if !token.IsIdentifier(ifaceName) {
+			return fmt.Errorf("invalid type name: %q", ifaceName)
+		}
+
+		return nil
+	}
+
+	if err := validInterface(v); err != nil {
+		// The client only sends back answers, not the original form fields.
+		// Clone the static form template so we can attach the validation
+		// error and send the complete form back for the client to re-render.
+		form := slices.Clone(implementInterfaceForm)
+		form[0].Error = err.Error()
+		param.FormFields = form
+		return nil
+	}
+
+	param.FormFields = nil
+	return nil
+}
+
+func formAnswer[T any](params *protocol.InteractiveParams, index int) (v T, err error) {
+	if len(params.FormAnswers) <= index {
+		return v, fmt.Errorf("truncated FormAnswers: got %d items, want at least %d", len(params.FormAnswers), index+1)
+	}
+
+	v, ok := params.FormAnswers[index].(T)
+	if !ok {
+		return v, fmt.Errorf("invalid type at index %d, want %T: got %T", index, *new(T), params.FormAnswers[index])
+	}
+
+	return v, nil
 }

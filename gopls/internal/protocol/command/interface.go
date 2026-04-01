@@ -29,7 +29,15 @@ import (
 // This interface is used to generate logic for marshaling,
 // unmarshaling, and dispatch, so it has some additional restrictions:
 //
-//  1. All method arguments must be JSON serializable.
+//  1. All method arguments must be JSON serializable and strictly typed
+//     (infallible) so they can be safely unmarshaled from the JSON
+//     Arguments array. The only exception is the final input parameter,
+//     which may be exactly [*protocol.InteractiveParams]. While this type
+//     contains an 'any' slice, it is explicitly exempted by the code
+//     generator because it is passed directly from the top-level
+//     ExecuteCommandParams rather than unmarshaled from the Arguments
+//     array. Its dynamic values are validated manually by the command
+//     handlers at runtime.
 //
 //  2. Methods must return either error or (T, error), where T is a
 //     JSON serializable type.
@@ -321,10 +329,13 @@ type Interface interface {
 	PackageSymbols(context.Context, PackageSymbolsArgs) (PackageSymbolsResult, error)
 
 	// ModifyTags: Add or remove struct tags on a given node.
-	ModifyTags(context.Context, ModifyTagsArgs) error
+	ModifyTags(context.Context, ModifyTagsArgs, *protocol.InteractiveParams) error
 
 	// MoveType: Move a type declaration to a different package.
 	MoveType(context.Context, MoveTypeArgs) error
+
+	// ImplementInterface: Add methods to a type to implement an interface.
+	ImplementInterface(context.Context, ImplementInterfaceArgs, *protocol.InteractiveParams) error
 }
 
 type RunTestsArgs struct {
@@ -857,6 +868,17 @@ type PackageSymbol struct {
 
 	// Index of this symbol's file in PackageSymbolsResult.Files
 	File int `json:"file,omitempty"`
+}
+
+type ImplementInterfaceArgs struct {
+	// Location is the location where the user invoked the code action.
+	// This location must be within a type declaration.
+	Location protocol.Location
+
+	// Interface is the fully qualified name of pacakge-level interface type to
+	// implement. It must follow the pattern "path/to/package.InterfaceName"
+	// (e.g., "io.Reader").
+	Interface string
 }
 
 // ModifyTagsArgs holds variables that determine how struct tags are modified.
