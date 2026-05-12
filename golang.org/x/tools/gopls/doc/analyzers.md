@@ -3139,7 +3139,10 @@ Package documentation: [embedlit](https://pkg.go.dev/golang.org/x/tools/go/analy
 <a id='errorsas'></a>
 ## `errorsas`: report passing non-pointer or non-error values to errors.As
 
-The errorsas analyzer reports calls to errors.As where the type of the second argument is not a pointer to a type implementing error.
+The errorsas analyzer reports calls to errors.As where the type of the second argument is not a pointer to a type implementing error. For example:
+
+	var unwrappedErr net.DNSError
+	errors.As(err, unwrappedErr) // should use &unwrappedErr, DNSError.Error has a pointer reciever
 
 
 Default: on.
@@ -3168,6 +3171,25 @@ The fix is only offered if the var declaration has the form shown and there are 
 Default: on.
 
 Package documentation: [errorsastype](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/modernize#errorsastype)
+
+<a id='errorsastype'></a>
+## `errorsastype`: Reports misuse of errors.AsType[T] in if/else chains.
+
+For example:
+
+	err := f()
+	if err, ok := errors.AsType[*FooErr](err); ok {
+	    useFoo(err)
+	} else if err, ok := errors.AsType[*BarErr](err); ok {
+	    useBar(err)
+	}
+
+In this case, the second call to errors.AsType does not operate on the original error. Instead, its operand is the zero value of type \*FooErr produced by the first if statement; this is invariably a mistake.
+
+
+Default: on.
+
+Package documentation: [errorsastype](https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/errorsastype)
 
 <a id='fieldalignment'></a>
 ## `fieldalignment`: find structs that would use less memory if their fields were sorted
@@ -3367,6 +3389,8 @@ The inliner takes care to avoid behavior changes, even subtle ones, such as chan
 to evaluate argument expressions in the correct order and bind them to parameter variables. Since the resulting code transformation may be stylistically suboptimal, such inlinings may be disabled by specifying the -inline.allow\_binding\_decl=false flag to the analyzer driver.
 
 (In cases where it is not safe to "reduce" a call—that is, to replace a call f(x) by the body of function f, suitably substituted—the inliner machinery is capable of replacing f by a function literal, func(){...}(). However, the inline analyzer discards all such "literalizations" unconditionally, again on grounds of style.)
+
+A call to a function F from its dedicated test (TestF) is not inlined, since the purpose of the test is to exercise F itself, even when it's a deprecated function to which other calls should be inlined. This is not true for type aliases; see [https://go.dev/issue/79271](https://go.dev/issue/79271). See further discussion in [https://go.dev/issue/79272](https://go.dev/issue/79272).
 
 \## Constants
 
