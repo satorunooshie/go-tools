@@ -41,6 +41,7 @@ import (
 	"golang.org/x/tools/go/analysis/passes/sigchanyzer"
 	"golang.org/x/tools/go/analysis/passes/slog"
 	"golang.org/x/tools/go/analysis/passes/sortslice"
+	"golang.org/x/tools/go/analysis/passes/sqlrowserr"
 	"golang.org/x/tools/go/analysis/passes/stdmethods"
 	"golang.org/x/tools/go/analysis/passes/stdversion"
 	"golang.org/x/tools/go/analysis/passes/stringintconv"
@@ -56,7 +57,7 @@ import (
 	"golang.org/x/tools/go/analysis/passes/waitgroup"
 	"golang.org/x/tools/gopls/internal/analysis/deprecated"
 	"golang.org/x/tools/gopls/internal/analysis/embeddirective"
-	"golang.org/x/tools/gopls/internal/analysis/errorsastype"
+	"golang.org/x/tools/gopls/internal/analysis/errorsastypeshadow"
 	"golang.org/x/tools/gopls/internal/analysis/fillreturns"
 	"golang.org/x/tools/gopls/internal/analysis/infertypeargs"
 	"golang.org/x/tools/gopls/internal/analysis/maprange"
@@ -184,6 +185,7 @@ var DefaultAnalyzers = []*Analyzer{
 	{analyzer: directive.Analyzer},
 	{analyzer: errorsas.Analyzer},
 	{analyzer: framepointer.Analyzer},
+	{analyzer: hostport.Analyzer},
 	{analyzer: httpresponse.Analyzer},
 	{analyzer: ifaceassert.Analyzer},
 	{analyzer: loopclosure.Analyzer},
@@ -204,6 +206,7 @@ var DefaultAnalyzers = []*Analyzer{
 	{analyzer: unreachable.Analyzer},
 	{analyzer: unsafeptr.Analyzer},
 	{analyzer: unusedresult.Analyzer},
+	{analyzer: waitgroup.Analyzer},
 
 	// not suitable for vet:
 	// - some (nilness, yield) use go/ssa; see #59714.
@@ -215,11 +218,11 @@ var DefaultAnalyzers = []*Analyzer{
 	{analyzer: yield.Analyzer},   // uses go/ssa
 	{analyzer: sortslice.Analyzer},
 	{analyzer: embeddirective.Analyzer},
-	{analyzer: scannererr.Analyzer},    // to appear in cmd/vet@go1.27
-	{analyzer: waitgroup.Analyzer},     // to appear in cmd/vet@go1.25
-	{analyzer: hostport.Analyzer},      // to appear in cmd/vet@go1.25
-	{analyzer: recursiveiter.Analyzer}, // under evaluation
-	{analyzer: writestring.Analyzer},
+	{analyzer: scannererr.Analyzer},         // to appear in cmd/vet@go1.28
+	{analyzer: sqlrowserr.Analyzer},         // to appear in cmd/vet@go1.28
+	{analyzer: recursiveiter.Analyzer},      // under evaluation
+	{analyzer: errorsastypeshadow.Analyzer}, // under evaluation
+	{analyzer: writestring.Analyzer},        // under evaluation
 
 	// disabled due to high false positives
 	{analyzer: shadow.Analyzer, severity: protocol.SeverityHint, nonDefault: true},         // very noisy
@@ -290,8 +293,6 @@ var DefaultAnalyzers = []*Analyzer{
 	{analyzer: nonewvars.Analyzer},
 	{analyzer: noresultvalues.Analyzer},
 	{analyzer: unusedvariable.Analyzer},
-
-	{analyzer: errorsastype.Analyzer},
 }
 
 func init() {
