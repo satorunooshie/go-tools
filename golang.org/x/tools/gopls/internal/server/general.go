@@ -127,7 +127,53 @@ func (s *server) Initialize(ctx context.Context, params *protocol.ParamInitializ
 	}
 
 	var semanticTokenProvider any
-	if options.SemanticTokens {
+	if options.SemanticTokens || options.ConfigurationSupported {
+		// Also provide the semantic token provider if the client supports
+		// Configuration calls. Reasoning:
+		//
+		// There are two ways to tell the client that this LSP server supports
+		// semantic token calls:
+		//   1. Return the semanticTokenProvider here in the `InitializeResult`
+		//   2. Anytime after Initialize() finishes, call
+		//    client.register("textDocument/semanticTokens") with the
+		//    semanticTokenProvider. Doing it this way would have many
+		//    specific requirements:
+		//    * The client must have set
+		//      `SemanticTokensClientCapabilities.dynamicRegistration = true`.
+		//    * The server must maintain the state of what it has actively
+		//      registered on the client, as the LSP doesn't allow the same
+		//      capability to be registered multiple times.
+		//    * As most clients don't support dynamic registration, we wouldn't
+		//      be able to just support that route, we would have to maintain
+		//      both static and dynamic registration paths.
+		//
+		// For all these reasons, we choose not to support the dynamic
+		// registration and fully rely on option 1.
+		//
+		// The only way the server would ever change to start/stop supporting
+		// semantic tokens is on a user's change of setting: `semanticTokens`.
+		// gopls only *retrieves* updated user configuration by sending
+		// `workspace/configuration` requests to the client.
+		// `options.ConfigurationSupported` indicates whether the client
+		// supports those calls and gopls doesn't send the `configuration`
+		// requests if not.
+		//
+		// gopls also will only send `workspace/configuration` requests after
+		// it receives a `workspace/didChangeConfiguration` request or if a new
+		// directory is added to the current session. We can't determine
+		// through the `ClientCapabilities` whether the either of these things
+		// can happen, so we have to always assume that they will.
+		//
+		// To conclude, the only signal to guarantee that gopls will never see
+		// updated user configs is if the client has
+		// `options.ConfigurationSupported = false`. So if the user currently
+		// has semanticTokens disabled AND their client doesn't support
+		// configuration calls, we know we never need to support semantic
+		// tokens and can inform the client by *not* returning a
+		// semanticTokenProvider. In any other case (the current scope) we need
+		// to return a semanticTokenProvider here so that the client will try
+		// to send `semanticToken` requests in the possibility that the user's
+		// gopls settings at that point allow us to return them.
 		semanticTokenProvider = protocol.SemanticTokensOptions{
 			Range: &protocol.Or_SemanticTokensOptions_range{Value: true},
 			Full:  &protocol.Or_SemanticTokensOptions_full{Value: true},
@@ -136,6 +182,12 @@ func (s *server) Initialize(ctx context.Context, params *protocol.ParamInitializ
 				TokenModifiers: moreslices.ConvertStrings[string](semtok.Modifiers),
 			},
 		}
+		// Note: If we ever get to a point that the performance of
+		// semanticTokens isn't significantly different from other file level
+		// LSP methods, we should remove this option alltogether and always
+		// return the semanticTokenProvider. At that point users can configure
+		// whether their client will send calls for the semantic tokens. This
+		// is a setting that should ideally live on the front-end.
 	}
 
 	versionInfo := debug.VersionInfo()
@@ -248,6 +300,9 @@ func (s *server) Initialized(ctx context.Context, params *protocol.InitializedPa
 	var registrations []protocol.Registration
 	options := s.Options()
 	if options.ConfigurationSupported && options.DynamicConfigurationSupported {
+		// Even though we are registering `didChangeConfiguration` based on the
+		// client capabilities, clients can and do still send requests to it
+		// even if it's not registered.
 		registrations = append(registrations, protocol.Registration{
 			ID:     "workspace/didChangeConfiguration",
 			Method: "workspace/didChangeConfiguration",
@@ -488,7 +543,7 @@ func (s *server) updateServerSideWatcher(ctx context.Context, patterns map[proto
 					OnDisk: true,
 				}
 			}
-			if err := s.didModifyFiles(watcherCtx, modifications, FromDidChangeWatchedFiles); err != nil {
+			if err := s.didModifyFiles(watcherCtx, FromDidChangeWatchedFiles, modifications...); err != nil {
 				event.Error(watcherCtx, "failed to process file changes", err)
 			}
 		}
@@ -756,50 +811,62 @@ func (s *server) Exit(ctx context.Context) error {
 
 // recordClientInfo records gopls client info.
 func recordClientInfo(clientName string) {
-	key := "gopls/client:other"
-	switch clientName {
-	case "Visual Studio Code":
-		key = "gopls/client:vscode"
-	case "Visual Studio Code - Insiders":
-		key = "gopls/client:vscode-insiders"
-	case "VSCodium":
-		key = "gopls/client:vscodium"
-	case "code-server":
+	// This table maps LSP (not MCP) clientInfo.Name prefixes to Go telemetry counters.
+	// Where authoritative source is available, we link to it.
+	for _, cli := range [...]struct {
+		clientNamePrefix, telemetryKey string
+	}{
+		{"Visual Studio Code - Insiders", "gopls/client:vscode-insiders"},
+		{"Visual Studio Code", "gopls/client:vscode"},
+
+		{"VSCodium", "gopls/client:vscodium"},
+
 		// https://github.com/coder/code-server/blob/3cb92edc76ecc2cfa5809205897d93d4379b16a6/ci/build/build-vscode.sh#L19
-		key = "gopls/client:code-server"
-	case "Eglot":
+		{"code-server", "gopls/client:code-server"},
+
 		// https://lists.gnu.org/archive/html/bug-gnu-emacs/2023-03/msg00954.html
-		key = "gopls/client:eglot"
-	case "govim":
+		{"Eglot", "gopls/client:eglot"},
+
 		// https://github.com/govim/govim/pull/1189
-		key = "gopls/client:govim"
-	case "helix":
+		{"govim", "gopls/client:govim"},
+
 		// https://github.com/helix-editor/helix/blob/d0218f7e78bc0c3af4b0995ab8bda66b9c542cf3/helix-lsp/src/client.rs#L714
-		key = "gopls/client:helix"
-	case "Neovim":
+		{"helix", "gopls/client:helix"},
+
 		// https://github.com/neovim/neovim/blob/42333ea98dfcd2994ee128a3467dfe68205154cd/runtime/lua/vim/lsp.lua#L1361
 		// https://github.com/neovim/neovim/blob/fe6026825883b44b09a8d3a03f2d49bfc8ed4725/runtime/lua/vim/lsp/client.lua#564
-		key = "gopls/client:neovim"
-	case "coc.nvim":
+		{"Neovim", "gopls/client:neovim"},
+
 		// https://github.com/neoclide/coc.nvim/blob/3dc6153a85ed0f185abec1deb972a66af3fbbfb4/src/language-client/client.ts#L994
-		key = "gopls/client:coc.nvim"
-	case "Sublime Text LSP":
+		{"coc.nvim", "gopls/client:coc.nvim"},
+
 		// https://github.com/sublimelsp/LSP/blob/e608f878e7e9dd34aabe4ff0462540fadcd88fcc/plugin/core/sessions.py#L493
-		key = "gopls/client:sublimetext"
-	case "Windsurf":
-		key = "gopls/client:windsurf"
-	case "Cursor":
-		key = "gopls/client:cursor"
-	case "Zed", "Zed Dev", "Zed Nightly", "Zed Preview":
+		{"Sublime Text LSP", "gopls/client:sublimetext"},
+
+		{"Cursor", "gopls/client:cursor"},
+
 		// https: //github.com/zed-industries/zed/blob/0ac17526687bf11007f0fbb5c3b2ff463ce47293/crates/release_channel/src/lib.rs#L147
-		key = "gopls/client:zed"
-	default:
-		// Accumulate at least a local counter for an unknown
-		// client name, but also fall through to count it as
-		// ":other" for collection.
-		if clientName != "" {
-			counter.New(fmt.Sprintf("gopls/client-other:%s", clientName)).Inc()
+		{"Zed", "gopls/client:zed"}, // incl. "Zed Dev", "Zed Nightly", "Zed Preview"
+
+		// (Observed empirically.)
+		{"Claude Code", "gopls/client:claude"},
+
+		// (Observed empirically.)
+		{"Antigravity", "gopls/client:antigravity"},
+		{"Jetski", "gopls/client:antigravity"},
+		{"Windsurf", "gopls/client:windsurf"},
+	} {
+		if strings.HasPrefix(clientName, cli.clientNamePrefix) {
+			counter.Inc(cli.telemetryKey)
+			return
 		}
 	}
-	counter.Inc(key)
+
+	// Accumulate at least a local counter for an unknown
+	// client name, but also fall through to count it as
+	// ":other" for collection.
+	if clientName != "" {
+		counter.New(fmt.Sprintf("gopls/client-other:%s", clientName)).Inc()
+	}
+	counter.Inc("gopls/client:other")
 }

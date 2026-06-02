@@ -3172,8 +3172,8 @@ Default: on.
 
 Package documentation: [errorsastype](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/modernize#errorsastype)
 
-<a id='errorsastype'></a>
-## `errorsastype`: Reports misuse of errors.AsType[T] in if/else chains.
+<a id='errorsastypeshadow'></a>
+## `errorsastypeshadow`: report shadowing of errors.AsType[T] in if/else chains
 
 For example:
 
@@ -3189,7 +3189,7 @@ In this case, the second call to errors.AsType does not operate on the original 
 
 Default: on.
 
-Package documentation: [errorsastype](https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/errorsastype)
+Package documentation: [errorsastypeshadow](https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/errorsastypeshadow)
 
 <a id='fieldalignment'></a>
 ## `fieldalignment`: find structs that would use less memory if their fields were sorted
@@ -3354,7 +3354,11 @@ Package documentation: [infertypeargs](https://pkg.go.dev/golang.org/x/tools/gop
 <a id='inline'></a>
 ## `inline`: apply fixes based on 'go:fix inline' comment directives
 
-The inline analyzer inlines functions and constants that are marked for inlining.
+The inline analyzer inlines functions, constants, and type aliases that are marked for inlining.
+
+Use this command to apply (just) inline fixes en masse:
+
+	$ go fix -inline ./...
 
 \## Functions
 
@@ -3390,8 +3394,6 @@ to evaluate argument expressions in the correct order and bind them to parameter
 
 (In cases where it is not safe to "reduce" a call—that is, to replace a call f(x) by the body of function f, suitably substituted—the inliner machinery is capable of replacing f by a function literal, func(){...}(). However, the inline analyzer discards all such "literalizations" unconditionally, again on grounds of style.)
 
-A call to a function F from its dedicated test (TestF) is not inlined, since the purpose of the test is to exercise F itself, even when it's a deprecated function to which other calls should be inlined. This is not true for type aliases; see [https://go.dev/issue/79271](https://go.dev/issue/79271). See further discussion in [https://go.dev/issue/79272](https://go.dev/issue/79272).
-
 \## Constants
 
 Given a constant that is marked for inlining, like this one:
@@ -3418,14 +3420,23 @@ or before a group, applying to every constant in the group:
 	//go:fix inline
 	const (
 		Ptr = Pointer
-	    Val = Value
+		Val = Value
 	)
 
-The proposal [https://go.dev/issue/32816](https://go.dev/issue/32816) introduces the "//go:fix inline" directives.
+\## Type aliases
 
-You can use this command to apply inline fixes en masse:
+Similar to named constants, a type alias can also be marked for inlining:
 
-	$ go run golang.org/x/tools/go/analysis/passes/inline/cmd/inline@latest -fix ./...
+	//go:fix inline
+	type A = newpkg.A
+
+The analyzer will replace all references to the annotated type (A) by the type on the right-hand side of the declaration (newpkg.A).
+
+\## Tests
+
+A use of a function, named constant, or type alias X from its dedicated test (TestX), is not inlined, since the purpose of the test is to exercise X itself, even if it is deprecated and other uses of it should be inlined. This applies to benchmarks and examples too, and follows the usual conventions of test function naming.
+
+Similarly, if the symbol X is declared in a file named foo.go, any use of it within a file named foo\_test.go will also not be inlined.
 
 
 Default: on.
@@ -4077,6 +4088,38 @@ sort.Slice requires an argument of a slice type. Check that the interface{} valu
 Default: on.
 
 Package documentation: [sortslice](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/sortslice)
+
+<a id='sqlrowserr'></a>
+## `sqlrowserr`: report failure to check sql.Rows.Err
+
+This analyzer reports uses of sql.Rows in which the result of a query such as db.Query() is assigned to a local variable that is then used in a loop that calls Rows.Next, but lacks a final check of Rows.Err. This causes row iteration errors to be discarded.
+
+For example:
+
+	rows, err := db.Query("select ...") // error: "sql.Rows rows is used in Next loop without final check of rows.Err()"
+	if err != nil {
+		return err
+	}
+	defer rows.Close() // ignore error
+	for rows.Next() {
+		var x int
+		if err := rows.Scan(&x); err != nil {
+			return err
+		}
+		use(x)
+	}
+	/* ...no use of rows.Err()... */
+
+Correct usage of sql.Rows demands both a call to Rows.Close to release resources and a call to Rows.Err to report iteration errors. It is not critical to report resource cleanup errors, but it is crucial to report iteration errors as they would otherwise be indistinguishable from a smaller result.
+
+To avoid false positives, the analyzer is silent if the Rows is passed into or out of the function or assigned somewhere other than a local variable.
+
+It is not this analyzer's goal to ensure proper handling of errors in all cases, but merely the simple mistakes where the user may have been oblivious to the existence of the Rows.Err method.
+
+
+Default: on.
+
+Package documentation: [sqlrowserr](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/sqlrowserr)
 
 <a id='stditerators'></a>
 ## `stditerators`: use iterators instead of Len/At-style APIs
