@@ -3019,15 +3019,48 @@ func main() {
 	}
 }
 
-func TestEmptyEnvironment(t *testing.T) {
-	t.Parallel()
+// TestConfigEnvDoesNotInheritProcessEnv tests that when Config.Env is non-nil
+// and doesn't contain os.Environ(), packages.Load doesn't inherit the process
+// environment.
+func TestConfigEnvDoesNotInheritProcessEnv(t *testing.T) {
+	testenv.NeedsGoPackages(t)
 
-	cfg := &packages.Config{
-		Env: []string{"FOO=BAR"},
+	dir := writeTree(t, `
+-- go.mod --
+module example.com
+
+go 1.18
+
+-- p/p.go --
+package p
+
+-- p/tagged.go --
+//go:build fromparent
+// +build fromparent
+
+package p
+`)
+
+	t.Setenv("GOFLAGS", "-tags=fromparent")
+
+	pkgs, err := packages.Load(&packages.Config{
+		Dir:  dir,
+		Mode: packages.NeedFiles,
+		Env: []string{
+			"PATH=" + os.Getenv("PATH"),
+			"GOCACHE=" + t.TempDir(),
+			"GOPACKAGESDRIVER=off",
+			"GOWORK=off",
+		},
+	}, "./p")
+	if err != nil {
+		t.Fatal(err)
 	}
-	_, err := packages.Load(cfg, "fmt")
-	if err == nil {
-		t.Fatal("Load with explicitly empty environment should fail")
+	if len(pkgs) != 1 {
+		t.Fatalf("Load returned %d packages, want 1", len(pkgs))
+	}
+	if got, want := strings.Join(srcs(pkgs[0]), " "), "p.go"; got != want {
+		t.Fatalf("GoFiles = %s, want %s", got, want)
 	}
 }
 
