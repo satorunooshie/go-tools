@@ -10,11 +10,14 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
 	"slices"
 
+	"golang.org/x/tools/gopls/internal/filecache"
 	"golang.org/x/tools/gopls/internal/protocol"
 	"golang.org/x/tools/gopls/internal/protocol/command"
-	"golang.org/x/tools/internal/tool"
+	"golang.org/x/tools/gopls/internal/tool"
+	"golang.org/x/tools/gopls/internal/util/bug"
 )
 
 // execute implements the LSP ExecuteCommand verb for gopls.
@@ -49,6 +52,15 @@ execute-flags:
 }
 
 func (e *execute) Run(ctx context.Context, args ...string) error {
+	// This undocumented environment variable allows
+	// the cmd integration test (and maintainers) to
+	// trigger a call to bug.Report.
+	if msg := os.Getenv("TEST_GOPLS_BUG"); msg != "" {
+		filecache.Start() // register bug handler
+		bug.Report(msg)
+		return nil
+	}
+
 	if len(args) == 0 {
 		return tool.CommandLineErrorf("execute requires a command name")
 	}

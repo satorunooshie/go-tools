@@ -605,7 +605,7 @@ var valueMarkerFuncs = map[string]func(marker){
 // See doc.go for marker documentation.
 var actionMarkerFuncs = map[string]func(marker){
 	"acceptcompletion": actionMarkerFunc(acceptCompletionMarker),
-	"codeaction":       actionMarkerFunc(codeActionMarker, "end", "diag", "action", "result", "edit", "err", "form0", "form1"),
+	"codeaction":       actionMarkerFunc(codeActionMarker, "end", "diag", "action", "result", "edit", "err", "answers"),
 	"codelenses":       actionMarkerFunc(codeLensesMarker),
 	"complete":         actionMarkerFunc(completeMarker),
 	"def":              actionMarkerFunc(defMarker),
@@ -1529,8 +1529,8 @@ func checkDiffs(mark marker, changed map[string][]byte, golden *Golden) {
 			mark.errorf("in @%s golden section %s: %v; actual diff:\n%s",
 				mark.note.Name, name, err, d)
 		}
-		if want != string(after) {
-			mark.errorf("%s: got:\n%s\nwant:\n%s", mark.note.Name, want, after)
+		if string(after) != want {
+			mark.errorf("%s: got:\n%s\nwant:\n%s", mark.note.Name, after, want)
 		}
 	}
 
