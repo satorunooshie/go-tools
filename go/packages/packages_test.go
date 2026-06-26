@@ -1705,7 +1705,7 @@ func testDriver(t *testing.T, exporter packagestest.Exporter) {
 			onpath:           true,
 			gopackagesdriver: gopackagesdriver + "nonesuch",
 			entrypoint:       "driver1",
-			want:             "error: no such file|file does not exist",
+			want:             "error: no such file|file does not exist|does not exist",
 		},
 		// -- tests of driver response payload --
 		{
@@ -3573,6 +3573,7 @@ func main() {
 // See golang/go#78083.
 func TestCompiledGoFilesIncludesDepsErrors(t *testing.T) {
 	testenv.NeedsGoPackages(t)
+	testenv.NeedsTool(t, "cgo")
 
 	dir := writeTree(t, `
 -- go.mod --
