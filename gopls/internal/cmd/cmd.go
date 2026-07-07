@@ -465,6 +465,10 @@ func (cli *client) LogMessage(ctx context.Context, p *protocol.LogMessageParams)
 		if cli.app.verbose() {
 			log.Print("Log:", p.Message)
 		}
+	case protocol.Debug:
+		if cli.app.verbose() {
+			log.Print("Debug:", p.Message)
+		}
 	default:
 		if cli.app.verbose() {
 			log.Print(p.Message)
@@ -674,7 +678,7 @@ func (cli *client) PublishDiagnostics(ctx context.Context, p *protocol.PublishDi
 		if desc := d.CodeDescription; desc != nil {
 			codeHref = desc.Href
 		}
-		k := key{d.Range, d.Severity, d.Code, codeHref, d.Source, d.Message}
+		k := key{d.Range, d.Severity, d.Code, codeHref, d.Source, d.MessageString()}
 		if !seen[k] {
 			seen[k] = true
 			out = append(out, d)
