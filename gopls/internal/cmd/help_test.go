@@ -29,21 +29,19 @@ var updateHelpFiles = flag.Bool("update-help-files", false, "Write out the help 
 func TestHelpFiles(t *testing.T) {
 	testenv.NeedsGoBuild(t) // This is a lie. We actually need the source code.
 	t.Parallel()
-	app := cmd.New()
 	tree := writeTree(t, "")
-	for _, cmd := range append(app.Commands(), app) {
-		name := cmd.Name()
+	for _, name := range cmd.CommandNames() {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			args := []string{name, "-h"}
 			// The output of 'gopls -h' is in usage.hlp
-			if cmd == app {
+			if name == "gopls" {
 				args = args[1:]
 				name = "usage"
 			}
 			res := gopls(t, tree, args...)
 			res.checkExit(true) // -h should result in exit 0
-			got := res.stderr
+			got := res.stdout
 			helpFile := filepath.Join("usage", name+".hlp")
 			if *updateHelpFiles {
 				if err := os.WriteFile(helpFile, []byte(got), 0666); err != nil {
@@ -67,7 +65,7 @@ func TestVerboseHelp(t *testing.T) {
 	tree := writeTree(t, "")
 	res := gopls(t, tree, "-v", "-h")
 	res.checkExit(true) // -h should result in exit 0
-	got := res.stderr
+	got := res.stdout
 	helpFile := filepath.Join("usage", "usage-v.hlp")
 	if *updateHelpFiles {
 		if err := os.WriteFile(helpFile, []byte(got), 0666); err != nil {
@@ -140,9 +138,16 @@ func TestHelpTree(t *testing.T) {
 		t.Run(strings.Join(test.args, " "), func(t *testing.T) {
 			res := gopls(t, tree, test.args...)
 			res.checkExit(test.wantSuccess)
-			res.checkStdout("^$") // no stdout
-			for _, pattern := range test.wantPatterns {
-				res.checkStderr(pattern)
+			if test.wantSuccess {
+				res.checkStderr("^$") // no stderr
+				for _, pattern := range test.wantPatterns {
+					res.checkStdout(pattern)
+				}
+			} else {
+				res.checkStdout("^$") // no stdout
+				for _, pattern := range test.wantPatterns {
+					res.checkStderr(pattern)
+				}
 			}
 		})
 	}
