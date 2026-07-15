@@ -22,15 +22,12 @@ import (
 	"time"
 
 	"golang.org/x/tools/gopls/internal/cache"
-	"golang.org/x/tools/gopls/internal/debug"
-	"golang.org/x/tools/gopls/internal/filecache"
 	"golang.org/x/tools/gopls/internal/lsprpc"
 	"golang.org/x/tools/gopls/internal/protocol"
-	"golang.org/x/tools/gopls/internal/protocol/command"
+	protocolcommand "golang.org/x/tools/gopls/internal/protocol/command"
 	"golang.org/x/tools/gopls/internal/protocol/semtok"
 	"golang.org/x/tools/gopls/internal/server"
 	"golang.org/x/tools/gopls/internal/settings"
-	"golang.org/x/tools/gopls/internal/tool"
 	"golang.org/x/tools/gopls/internal/util/browser"
 	"golang.org/x/tools/gopls/internal/util/bug"
 	"golang.org/x/tools/gopls/internal/util/moreslices"
@@ -38,24 +35,23 @@ import (
 	"golang.org/x/tools/internal/jsonrpc2"
 )
 
-// Application is the main application as passed to tool.Main
-// It handles the main command line parsing and dispatch to the sub commands.
-type Application struct {
+// application represents the root gopls command and coordinates subcommand dispatch.
+type application struct {
 	// Core application flags
 
 	// Embed the basic profiling flags supported by the tool package
-	tool.Profile
+	ProfileFlags
 
 	// We include the server configuration directly for now, so the flags work
 	// even without the verb.
 	// TODO: Remove this when we stop allowing the serve verb by default.
-	Serve Serve
+	serve serve
 
 	// the options configuring function to invoke when building a server
 	options func(*settings.Options)
 
-	// Support for remote LSP server.
-	Remote string `flag:"remote" help:"forward all commands to a remote lsp specified by this flag. With no special prefix, this is assumed to be a TCP address. If prefixed by 'unix;', the subsequent address is assumed to be a unix domain socket. If 'auto', or prefixed by 'auto;', the remote address is automatically resolved based on the executing environment."`
+	// Remote LSP client connection flags.
+	RemoteFlags
 
 	// Verbose enables verbose logging.
 	Verbose bool `flag:"v,verbose" help:"verbose output"`
@@ -91,35 +87,65 @@ type EditFlags struct {
 	List     bool `flag:"l,list" help:"display names of edited files"`
 }
 
-func (app *Application) verbose() bool {
+// RemoteFlags defines the set of flags for the forward mode.
+type RemoteFlags struct {
+	Remote string `flag:"remote" help:"forward all commands to a remote lsp specified by this flag. With no special prefix, this is assumed to be a TCP address. If prefixed by 'unix;', the subsequent address is assumed to be a unix domain socket. If 'auto', or prefixed by 'auto;', the remote address is automatically resolved based on the executing environment."`
+
+	// The following flags are used with -remote=auto mode.
+	RemoteDebug         string        `flag:"remote.debug" help:"when used with -remote=auto, the -debug value used to start the daemon"`
+	RemoteListenTimeout time.Duration `flag:"remote.listen.timeout" help:"when used with -remote=auto, the -listen.timeout value used to start the daemon"`
+
+	RemoteLogfile string `flag:"remote.logfile" help:"when used with -remote=auto, the -logfile value used to start the daemon"`
+}
+
+func (r *RemoteFlags) remoteArgs(network, address string) []string {
+	args := []string{
+		"serve",
+		"-listen", fmt.Sprintf(`%s;%s`, network, address),
+	}
+	if r.RemoteDebug != "" {
+		args = append(args, "-debug", r.RemoteDebug)
+	}
+	timeout := r.RemoteListenTimeout
+	if timeout == 0 {
+		timeout = 1 * time.Minute
+	}
+	args = append(args, "-listen.timeout", timeout.String())
+	if r.RemoteLogfile != "" {
+		args = append(args, "-logfile", r.RemoteLogfile)
+	}
+	return args
+}
+
+func (app *application) verbose() bool {
 	return app.Verbose || app.VeryVerbose
 }
 
-// New returns a new Application ready to run.
-func New() *Application {
-	app := &Application{
-		Serve: Serve{
+// newApplication returns a new application ready to run.
+func newApplication() *application {
+	app := &application{
+		RemoteFlags: RemoteFlags{
 			RemoteListenTimeout: 1 * time.Minute,
 		},
 	}
-	app.Serve.app = app
+	app.serve.app = app
 	return app
 }
 
-// Name implements tool.Application returning the binary name.
-func (app *Application) Name() string { return "gopls" }
+// Name implements command returning the binary name.
+func (app *application) Name() string { return "gopls" }
 
-// Usage implements tool.Application returning empty extra argument usage.
-func (app *Application) Usage() string { return "" }
+// Usage implements command returning empty extra argument usage.
+func (app *application) Usage() string { return "" }
 
-// ShortHelp implements tool.Application returning the main binary help.
-func (app *Application) ShortHelp() string {
+// ShortHelp implements command returning the main binary help.
+func (app *application) ShortHelp() string {
 	return ""
 }
 
-// DetailedHelp implements tool.Application returning the main binary help.
+// DetailedHelp implements command returning the main binary help.
 // This includes the short help for all the sub commands.
-func (app *Application) DetailedHelp(f *flag.FlagSet) {
+func (app *application) DetailedHelp(f *flag.FlagSet) {
 	w := tabwriter.NewWriter(f.Output(), 0, 0, 2, ' ', 0)
 	defer w.Flush()
 
@@ -127,8 +153,10 @@ func (app *Application) DetailedHelp(f *flag.FlagSet) {
 gopls is a Go language server.
 
 It is typically used with an editor to provide language features. When no
-command is specified, gopls will default to the 'serve' command. The language
-features can also be accessed via the gopls command-line interface.
+command is specified, gopls will default to the 'serve' command. To see flags
+for the 'serve' command, run 'gopls help serve'.
+
+The language features can also be accessed via the gopls command-line interface.
 
 For documentation of all its features, see:
 
@@ -155,6 +183,7 @@ Command:
 	}
 	fmt.Fprint(w, "\nflags:\n")
 	printFlagDefaults(f)
+	fmt.Fprint(w, "\nFor flags specific to running the language server (such as -listen, -logfile, or -debug), run 'gopls help serve'.\n")
 }
 
 // this is a slightly modified version of flag.PrintDefaults to give us control
@@ -226,45 +255,26 @@ func isZeroValue(f *flag.Flag, value string) bool {
 	return value == z.Interface().(flag.Value).String()
 }
 
-// Run takes the args after top level flag processing, and invokes the correct
-// sub command as specified by the first argument.
-// If no arguments are passed it will invoke the server sub command, as a
-// temporary measure for compatibility.
-func (app *Application) Run(ctx context.Context, args ...string) error {
-	// In the category of "things we can do while waiting for the Go command":
-	// Pre-initialize the filecache, which takes ~50ms to hash the gopls
-	// executable, and immediately runs a gc.
-	filecache.Start()
-
-	ctx = debug.WithInstance(ctx, app.OTel)
-	if len(args) == 0 {
-		s := flag.NewFlagSet(app.Name(), flag.ExitOnError)
-		return tool.Run(ctx, s, &app.Serve, args)
-	}
-	command, args := args[0], args[1:]
-	for _, c := range app.Commands() {
-		if c.Name() == command {
-			s := flag.NewFlagSet(app.Name(), flag.ExitOnError)
-			return tool.Run(ctx, s, c, args)
-		}
-	}
-	return tool.CommandLineErrorf("Unknown command %v", command)
+// Run implements command, but should never be invoked directly.
+// Main coordinates normalization and subcommand dispatching.
+func (app *application) Run(ctx context.Context, args ...string) error {
+	panic("unreachable: application.Run should never be called directly")
 }
 
 // Commands returns the set of commands supported by the gopls tool on the
 // command line.
 // The command is specified by the first non flag argument.
-func (app *Application) Commands() []tool.Application {
-	var commands []tool.Application
+func (app *application) Commands() []command {
+	var commands []command
 	commands = append(commands, app.mainCommands()...)
 	commands = append(commands, app.featureCommands()...)
 	commands = append(commands, app.internalCommands()...)
 	return commands
 }
 
-func (app *Application) mainCommands() []tool.Application {
-	return []tool.Application{
-		&app.Serve,
+func (app *application) mainCommands() []command {
+	return []command{
+		&app.serve,
 		&version{app: app},
 		&help{app: app},
 		&apiJSON{app: app},
@@ -272,14 +282,14 @@ func (app *Application) mainCommands() []tool.Application {
 	}
 }
 
-func (app *Application) internalCommands() []tool.Application {
-	return []tool.Application{
+func (app *application) internalCommands() []command {
+	return []command{
 		&vulncheck{app: app},
 	}
 }
 
-func (app *Application) featureCommands() []tool.Application {
-	return []tool.Application{
+func (app *application) featureCommands() []command {
+	return []command{
 		&callHierarchy{app: app},
 		&check{app: app, Severity: "warning"},
 		&codeaction{app: app},
@@ -307,7 +317,8 @@ func (app *Application) featureCommands() []tool.Application {
 }
 
 // connect creates and initializes a new in-process gopls LSP session.
-func (app *Application) connect(ctx context.Context) (*client, *cache.Session, error) {
+func (app *application) connect(ctx context.Context) (*client, *cache.Session, error) {
+
 	root, err := os.Getwd()
 	if err != nil {
 		return nil, nil, fmt.Errorf("finding workdir: %v", err)
@@ -399,7 +410,7 @@ func (cli *client) initialize(ctx context.Context, server protocol.Server, param
 // connection; it conceptually corresponds to a single call to
 // connect(2).
 type client struct {
-	app *Application
+	app *application
 
 	server           protocol.Server
 	initializeResult *protocol.InitializeResult // includes server capabilities
@@ -421,7 +432,7 @@ type cmdFile struct {
 	diagnostics   []protocol.Diagnostic
 }
 
-func newClient(app *Application) *client {
+func newClient(app *application) *client {
 	return &client{
 		app:     app,
 		files:   make(map[protocol.DocumentURI]*cmdFile),
@@ -817,7 +828,7 @@ func (cli *client) openFile(ctx context.Context, uri protocol.DocumentURI) (*cmd
 }
 
 func diagnoseFiles(ctx context.Context, server protocol.Server, files []protocol.DocumentURI) error {
-	cmd := command.NewDiagnoseFilesCommand("Diagnose files", command.DiagnoseFilesArgs{
+	cmd := protocolcommand.NewDiagnoseFilesCommand("Diagnose files", protocolcommand.DiagnoseFilesArgs{
 		Files: files,
 	})
 	_, err := executeCommand(ctx, server, cmd)

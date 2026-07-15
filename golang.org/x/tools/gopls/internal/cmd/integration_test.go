@@ -27,7 +27,6 @@ package cmd_test
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"math/rand"
@@ -41,7 +40,6 @@ import (
 	"golang.org/x/tools/gopls/internal/cmd"
 	"golang.org/x/tools/gopls/internal/debug"
 	"golang.org/x/tools/gopls/internal/protocol"
-	"golang.org/x/tools/gopls/internal/tool"
 	"golang.org/x/tools/gopls/internal/util/bug"
 	"golang.org/x/tools/gopls/internal/version"
 	"golang.org/x/tools/internal/testenv"
@@ -81,6 +79,17 @@ func TestVersion(t *testing.T) {
 				t.Errorf("expected Version %q, got %q (%v)", want, v.Version, res)
 			}
 		}
+	}
+}
+
+func TestProfileFlags(t *testing.T) {
+	t.Parallel()
+	tree := writeTree(t, "")
+	cpuProfile := filepath.Join(t.TempDir(), "cpu.prof")
+	res := gopls(t, tree, "-profile.cpu="+cpuProfile, "version")
+	res.checkExit(true)
+	if info, err := os.Stat(cpuProfile); err != nil || info.Size() == 0 {
+		t.Errorf("expected non-empty profile file %s, got err=%v", cpuProfile, err)
 	}
 }
 
@@ -302,7 +311,7 @@ func g() {
 	{
 		res := gopls(t, tree, "definition", "-json", "-markdown", "a.go:4:7")
 		res.checkExit(true)
-		var defn cmd.Definition
+		var defn cmd.DefinitionJSON
 		if res.toJSON(&defn) {
 			if !strings.HasPrefix(defn.Description, "```go\nfunc fmt.Println") {
 				t.Errorf("Description does not start with markdown code block. Got: %s", defn.Description)
@@ -878,7 +887,7 @@ package foo
 	res := gopls(t, tree, "stats")
 	res.checkExit(true)
 
-	var stats cmd.GoplsStats
+	var stats cmd.StatsJSON
 	if err := json.Unmarshal([]byte(res.stdout), &stats); err != nil {
 		t.Fatalf("failed to unmarshal JSON output of stats command: %v", err)
 	}
@@ -930,7 +939,7 @@ package foo
 		res2 := gopls(t, tree, "stats", "-anon")
 		res2.checkExit(true)
 
-		var stats2 cmd.GoplsStats
+		var stats2 cmd.StatsJSON
 		if err := json.Unmarshal([]byte(res2.stdout), &stats2); err != nil {
 			t.Fatalf("failed to unmarshal JSON output of stats command: %v", err)
 		}
@@ -1093,6 +1102,57 @@ func someFunctionName()
 	}
 }
 
+func TestCommandLineErrors(t *testing.T) {
+	testenv.NeedsGoBuild(t)
+	t.Parallel()
+	tree := writeTree(t, "")
+	for _, tc := range []struct {
+		name     string
+		args     []string
+		wantErrs []string
+	}{
+		{
+			name:     "MissingPositionalArgShowsUsage",
+			args:     []string{"definition"},
+			wantErrs: []string{"definition expects 1 argument", "Usage:\n  gopls \\[flags\\] definition \\[definition-flags\\] <position>"},
+		},
+		{
+			name:     "GlobalFlagAfterServe",
+			args:     []string{"serve", "-otel=http://localhost:4318"},
+			wantErrs: []string{`flag -otel must be placed before subcommand serve \(after gopls\)`},
+		},
+		{
+			name:     "MisplacedContainerFlag",
+			args:     []string{"remote", "-remote=localhost:12345", "sessions"},
+			wantErrs: []string{`flag -remote must be placed before subcommand remote \(after gopls\)`},
+		},
+
+		{
+			name:     "UnknownSubcommandFlag",
+			args:     []string{"-v", "execute", "-unknown"},
+			wantErrs: []string{"flag provided but not defined: -unknown"},
+		},
+		{
+			name:     "GlobalFlagAfterSubcommand",
+			args:     []string{"references", "-v", "./gopls/main.go:35:8"},
+			wantErrs: []string{`flag -v must be placed before subcommand references \(after gopls\)`},
+		},
+		{
+			name:     "GlobalFlagAfterNestedSubcommand",
+			args:     []string{"remote", "debug", "-v"},
+			wantErrs: []string{`gopls remote debug: flag -v must be placed before subcommand debug \(after gopls\)`},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := gopls(t, tree, tc.args...)
+			res.checkExit(false)
+			for _, wantErr := range tc.wantErrs {
+				res.checkStderr(wantErr)
+			}
+		})
+	}
+}
+
 // -- test framework --
 
 func TestMain(m *testing.M) {
@@ -1116,7 +1176,7 @@ func goplsMain() {
 		version.VersionOverride = v
 	}
 
-	tool.Main(context.Background(), cmd.New(), os.Args[1:])
+	cmd.Main()
 }
 
 // writeTree extracts a txtar archive into a new directory and returns its path.
