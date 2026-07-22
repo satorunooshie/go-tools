@@ -35,7 +35,7 @@ var StringsCutAnalyzer = &analysis.Analyzer{
 		typeindexanalyzer.Analyzer,
 	},
 	Run: stringscut,
-	URL: "https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/modernize#stringscut",
+	URL: "https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/modernize#hdr-Analyzer_stringscut",
 }
 
 // stringscut offers a fix to replace an occurrence of strings.Index{,Byte} with
@@ -514,7 +514,7 @@ func indexArgValid(info *types.Info, index *typeindex.Index, expr ast.Expr, afte
 			indexArgValid(info, index, expr.Args[0], afterPos) // check s in []byte(s)
 	case *ast.Ident:
 		for use := range index.Uses(info.Uses[expr]) {
-			if isScalarLvalue(info, use) {
+			if typesinternal.IsAssignedOrAddressTaken(info, use) {
 				return false
 			}
 		}
