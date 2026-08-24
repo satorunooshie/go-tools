@@ -605,7 +605,7 @@ var valueMarkerFuncs = map[string]func(marker){
 // See doc.go for marker documentation.
 var actionMarkerFuncs = map[string]func(marker){
 	"acceptcompletion": actionMarkerFunc(acceptCompletionMarker),
-	"codeaction":       actionMarkerFunc(codeActionMarker, "end", "diag", "action", "result", "edit", "err", "answers"),
+	"codeaction":       actionMarkerFunc(codeActionMarker, "end", "diag", "action", "result", "edit", "err", "answers", "title"),
 	"codelenses":       actionMarkerFunc(codeLensesMarker),
 	"complete":         actionMarkerFunc(completeMarker),
 	"def":              actionMarkerFunc(defMarker),
@@ -1018,7 +1018,7 @@ func newEnv(t *testing.T, cache *cache.Cache, files, proxyFiles map[string][]byt
 	}
 
 	for _, dir := range writeGoSum {
-		if _, err := sandbox.RunGoCommand(context.Background(), dir, "list", []string{"-mod=mod", "..."}, []string{"GOWORK=off"}, true); err != nil {
+		if _, err := sandbox.RunGoCommand(context.Background(), dir, "list", []string{"-mod=mod", "./..."}, []string{"GOWORK=off"}, true); err != nil {
 			t.Fatal(err)
 		}
 	}
