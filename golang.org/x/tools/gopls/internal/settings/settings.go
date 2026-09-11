@@ -89,7 +89,6 @@ func (o *Options) Debug() []string {
 type ClientOptions struct {
 	ClientInfo                                 protocol.ClientInfo
 	InsertTextFormat                           protocol.InsertTextFormat
-	InsertReplaceSupported                     bool
 	ConfigurationSupported                     bool
 	DynamicConfigurationSupported              bool
 	DynamicRegistrationSemanticTokensSupported bool
@@ -102,8 +101,10 @@ type ClientOptions struct {
 	SemanticTypes                              []string
 	SemanticMods                               []string
 	RelatedInformationSupported                bool
-	CompletionTags                             bool
 	CompletionDeprecated                       bool
+	CompletionInsertReplaceSupported           bool
+	CompletionLabelDetailsSupported            bool
+	CompletionTags                             bool
 	SupportedResourceOperations                []protocol.ResourceOperationKind
 	CodeActionResolveOptions                   []string
 	ShowDocumentSupported                      bool
@@ -1082,7 +1083,8 @@ func (o *Options) ForClientCapabilities(clientInfo *protocol.ClientInfo, caps pr
 	if c := caps.TextDocument.Completion; c.CompletionItem.SnippetSupport {
 		o.InsertTextFormat = protocol.SnippetTextFormat
 	}
-	o.InsertReplaceSupported = caps.TextDocument.Completion.CompletionItem.InsertReplaceSupport
+	o.CompletionInsertReplaceSupported = caps.TextDocument.Completion.CompletionItem.InsertReplaceSupport
+	o.CompletionLabelDetailsSupported = caps.TextDocument.Completion.CompletionItem.LabelDetailsSupport
 	if caps.Window.ShowDocument != nil {
 		o.ShowDocumentSupported = caps.Window.ShowDocument.Support
 	}
