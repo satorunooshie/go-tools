@@ -1819,7 +1819,7 @@ func (c *commandHandler) ImplementInterface(ctx context.Context, args command.Im
 		progress: "Implement interface X",
 		forURI:   args.Location.URI,
 	}, func(ctx context.Context, deps commandDeps) error {
-		iface, err := golang.FormAnswer[string](params, "interface")
+		iface, err := params.RequiredAnswer[string]("interface")
 		if err != nil {
 			return err
 		}
@@ -1840,7 +1840,7 @@ func (c *commandHandler) ModifyTags(ctx context.Context, args command.ModifyTags
 		if len(params.FormAnswers) > 0 {
 			switch args.Modification {
 			case "add":
-				tags, err := golang.FormAnswer[string](params, "tags")
+				tags, err := params.RequiredAnswer[string]("tags")
 				if err != nil {
 					return err
 				}
@@ -1848,12 +1848,12 @@ func (c *commandHandler) ModifyTags(ctx context.Context, args command.ModifyTags
 				if err != nil {
 					return err
 				}
-				args.Transform, err = golang.FormAnswer[string](params, "transform")
+				args.Transform, err = params.RequiredAnswer[string]("transform")
 				if err != nil {
 					return err
 				}
 			case "remove":
-				tags, err := golang.FormAnswer[string](params, "tags")
+				tags, err := params.RequiredAnswer[string]("tags")
 				if err != nil {
 					return err
 				}
@@ -1966,4 +1966,32 @@ func (c *commandHandler) MoveDeclaration(ctx context.Context, args command.MoveD
 		}
 		return applyChanges(ctx, c.s.client, changes)
 	})
+}
+
+func (c *commandHandler) ResolveTarget(ctx context.Context, args command.ResolveTargetParams) (command.ResolveTargetResult, error) {
+	var result command.ResolveTargetResult
+	err := c.run(ctx, commandConfig{
+		forURI: args.TextDocument.URI,
+	}, func(ctx context.Context, deps commandDeps) error {
+		res, err := golang.ResolveTarget(ctx, deps.snapshot, args)
+		if err != nil {
+			return err
+		}
+		result = res
+		return nil
+	})
+
+	// sort matches for determinism
+	sort.SliceStable(result.Matches, func(i, j int) bool {
+		iv, jv := result.Matches[i], result.Matches[j]
+		// In order of precedence, sort by name, then URI, then line number.
+		if iv.Name != jv.Name {
+			return iv.Name < jv.Name
+		} else if iv.Location.URI != jv.Location.URI {
+			return iv.Location.URI < jv.Location.URI
+		}
+		return iv.Location.Range.Start.Line < jv.Location.Range.Start.Line
+	})
+
+	return result, err
 }
