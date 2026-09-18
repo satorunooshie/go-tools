@@ -26,6 +26,64 @@ const (
 		packages.NeedTypesSizes
 )
 
+// TestOverlayModulePath checks that overlay package paths respect module
+// directory boundaries and prefer the innermost containing module.
+func TestOverlayModulePath(t *testing.T) {
+	t.Parallel()
+	testenv.NeedsTool(t, "go")
+
+	workspace := t.TempDir()
+	moduleRoot := filepath.Join(workspace, "mod")
+	nestedRoot := filepath.Join(moduleRoot, "nested")
+	if err := os.MkdirAll(nestedRoot, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(moduleRoot, "go.mod"), []byte("module example.com/mod\n\nrequire example.com/nested v0.0.0\n\nreplace example.com/nested => ./nested\n\ngo 1.26\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nestedRoot, "go.mod"), []byte("module example.com/nested\n\ngo 1.26\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range []struct {
+		name string
+		dir  string
+		want string
+	}{
+		{
+			name: "outside_module_with_root_prefix",
+			dir:  filepath.Join(workspace, "mod2", "pkg"),
+			want: filepath.Join(workspace, "mod2", "pkg"),
+		},
+		{
+			name: "nested_module",
+			dir:  filepath.Join(nestedRoot, "pkg"),
+			want: "example.com/nested/pkg",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			config := &packages.Config{
+				Dir:  moduleRoot,
+				Env:  append(os.Environ(), "GOPACKAGESDRIVER=off"),
+				Mode: packages.NeedName | packages.NeedFiles,
+				Overlay: map[string][]byte{
+					filepath.Join(test.dir, "pkg.go"): []byte("package pkg\n"),
+				},
+			}
+			pkgs, err := packages.Load(config, test.dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(pkgs) != 1 {
+				t.Fatalf("packages.Load returned %d packages, want 1: %v", len(pkgs), pkgs)
+			}
+			if got := pkgs[0].PkgPath; got != test.want {
+				t.Fatalf("PkgPath = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestOverlayChangesPackageName(t *testing.T) {
 	testAllOrModulesParallel(t, testOverlayChangesPackageName)
 }
@@ -1102,5 +1160,54 @@ replace (
 	}
 	if _, ok := pkg.Imports["fmt"]; !ok {
 		t.Fatalf(`expected import "fmt", got none`)
+	}
+}
+
+func TestOverlayInSecondGoWorkModule(t *testing.T) {
+	testenv.NeedsGoPackages(t)
+	t.Parallel()
+
+	workspace := t.TempDir()
+	moduleA := filepath.Join(workspace, "a")
+	moduleB := filepath.Join(workspace, "b")
+	for _, module := range []struct {
+		dir  string
+		path string
+	}{
+		{dir: moduleA, path: "example.com/a"},
+		{dir: moduleB, path: "example.com/b"},
+	} {
+		if err := os.MkdirAll(module.dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(module.dir, "go.mod"), []byte(fmt.Sprintf("module %s\n\ngo 1.21\n", module.path)), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "go.work"), []byte("go 1.21\n\nuse (\n\t./a\n\t./b\n)\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	overlayFile := filepath.Join(moduleB, "newpkg", "new.go")
+	config := &packages.Config{
+		Dir:  workspace,
+		Env:  append(os.Environ(), "GOPACKAGESDRIVER=off"),
+		Mode: packages.LoadAllSyntax,
+		Overlay: map[string][]byte{
+			overlayFile: []byte("package newpkg\n"),
+		},
+	}
+	pkgs, err := packages.Load(config, "file="+overlayFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pkgs) != 1 {
+		t.Fatalf("got %d packages, want 1: %v", len(pkgs), pkgs)
+	}
+	if got := pkgs[0].PkgPath; got != "example.com/b/newpkg" {
+		t.Fatalf("package path = %q, want %q", got, "example.com/b/newpkg")
+	}
+	if len(pkgs[0].Errors) != 0 {
+		t.Fatalf("package errors = %v, want none", pkgs[0].Errors)
 	}
 }
