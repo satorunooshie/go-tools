@@ -25,7 +25,9 @@ import (
 	"golang.org/x/tools/gopls/internal/cache/parsego"
 	"golang.org/x/tools/gopls/internal/file"
 	"golang.org/x/tools/gopls/internal/protocol"
+	"golang.org/x/tools/gopls/internal/util/safetoken"
 	"golang.org/x/tools/internal/astutil"
+	"golang.org/x/tools/internal/diff"
 	"golang.org/x/tools/internal/moreiters"
 	"golang.org/x/tools/internal/refactor"
 	"golang.org/x/tools/internal/typesinternal"
@@ -107,7 +109,8 @@ func MoveDeclaration(ctx context.Context, snapshot *cache.Snapshot, srcFH file.H
 	if !ok {
 		return nil, protocol.Location{}, fmt.Errorf("no AST selection found at cursor")
 	}
-	_, _, targetObj := moveDeclTarget(srcPkg.TypesInfo(), cur)
+	srcInfo := srcPkg.TypesInfo()
+	_, _, targetObj := moveDeclTarget(srcInfo, cur)
 	if targetObj == nil {
 		return nil, protocol.Location{}, fmt.Errorf("could not resolve target declaration")
 	}
@@ -165,8 +168,9 @@ func MoveDeclaration(ctx context.Context, snapshot *cache.Snapshot, srcFH file.H
 	}
 	// Dest: write the declarations at the bottom of the file.
 	var declsText strings.Builder
+	destPkgPath := string(destPkg.Metadata().PkgPath)
 	for i, r := range movingRanges {
-		text, err := r.text()
+		text, err := r.text(srcInfo, destPkgPath)
 		if err != nil {
 			return nil, protocol.Location{}, err
 		}
@@ -201,10 +205,6 @@ func MoveDeclaration(ctx context.Context, snapshot *cache.Snapshot, srcFH file.H
 		return nil, protocol.Location{}, err
 	}
 	changes = append(changes, docChanges...)
-	// TODO(mkalil): Rewrite package qualifiers inside the moving decls. The moved
-	// text is copied exactly from src, so a moving decl that refers to destPkg
-	// (e.g. "dest.Existing()") keeps its "dest." qualifier, which doesn't compile
-	// in dest.
 	// TODO(mkalil): Handle edge cases involving interfaces.
 	return changes, protocol.Location{URI: destURI, Range: show}, nil
 }
@@ -680,25 +680,53 @@ func canMove(snapshot *cache.Snapshot, srcPkg, destPkg *cache.Package, destURI p
 
 // A movingRange is a decl in srcPkg that moves to the destination.
 type movingRange struct {
-	pgf        *parsego.File
-	start, end token.Pos    // span of the moving decl
-	group      *ast.GenDecl // if the range is a spec: the enclosing GenDecl, only some of whose specs move
+	pgf *parsego.File
+	// Span of the moving decl.
+	start, end token.Pos
+	// Keyword (e.g. var, const, type) if the range is a single spec of a GenDecl;
+	// token.ILLEGAL if it is a whole decl.
+	tok token.Token
 }
 
 // Range returns the span of r in its source file.
 func (r movingRange) Range() astutil.Range { return astutil.RangeOf(r.start, r.end) }
 
-// text returns the source text of r to insert in the destination file.
-// If r is a spec, its keyword is prepended to make it a declaration, e.g. "var x = 1".
-func (r movingRange) text() (string, error) {
-	src, err := r.pgf.PosText(r.start, r.end)
+// text returns the source text of the movingRange r to insert in the
+// destination file. If r is a spec, its keyword is prepended to make it a
+// declaration, e.g. "var" in "var x = 1".
+// References to destPkg within r lose their qualifier, e.g. "dest.F()" becomes "F()".
+func (r movingRange) text(info *types.Info, destPkgPath string) (string, error) {
+	startOff, endOff, err := safetoken.Offsets(r.pgf.Tok, r.start, r.end)
 	if err != nil {
 		return "", err
 	}
-	if r.group != nil {
-		return r.group.Tok.String() + " " + string(src), nil
+	// Delete the qualifier of each reference to destPkg.
+	// Edit offsets are relative to startOff.
+	var edits []diff.Edit
+	if curRange, ok := r.pgf.Cursor().FindByPos(r.start, r.end); ok {
+		for curSel := range curRange.Preorder((*ast.SelectorExpr)(nil)) {
+			sel := curSel.Node().(*ast.SelectorExpr)
+			if id, ok := sel.X.(*ast.Ident); ok {
+				if pkgName, ok := info.Uses[id].(*types.PkgName); ok && pkgName.Imported().Path() == destPkgPath {
+					idOff, selOff, err := safetoken.Offsets(r.pgf.Tok, id.Pos(), sel.Sel.Pos())
+					if err != nil {
+						return "", err
+					}
+					edits = append(edits, diff.Edit{Start: idOff - startOff, End: selOff - startOff})
+				}
+			}
+		}
 	}
-	return string(src), nil
+	src := r.pgf.Src[startOff:endOff]
+	text, err := diff.Apply(string(src), edits)
+	if err != nil {
+		return "", err
+	}
+	if r.tok != token.ILLEGAL {
+		// Prepend a keyword ("var" or "type") to a single spec.
+		return r.tok.String() + " " + text, nil
+	}
+	return text, nil
 }
 
 // ranges returns the source spans of the given moving ranges.
@@ -725,14 +753,14 @@ func extractMovingDeclarations(srcPkg *cache.Package, moving map[types.Object]bo
 		return obj != nil && moving[obj]
 	}
 	for _, pgf := range srcPkg.CompiledGoFiles() {
-		addMovingRange := func(n ast.Node, group *ast.GenDecl) {
-			movingRanges = append(movingRanges, movingRange{pgf: pgf, start: n.Pos(), end: n.End(), group: group})
+		addMovingRange := func(n ast.Node, tok token.Token) {
+			movingRanges = append(movingRanges, movingRange{pgf: pgf, start: n.Pos(), end: n.End(), tok: tok})
 		}
 		for _, decl := range pgf.File.Decls {
 			switch decl := decl.(type) {
 			case *ast.FuncDecl:
 				if isMoving(decl.Name) {
-					addMovingRange(decl, nil)
+					addMovingRange(decl, token.ILLEGAL)
 				}
 			case *ast.GenDecl:
 				var movingSpecs []ast.Spec
@@ -752,10 +780,10 @@ func extractMovingDeclarations(srcPkg *cache.Package, moving map[types.Object]bo
 					continue
 				}
 				if len(movingSpecs) == len(decl.Specs) {
-					addMovingRange(decl, nil) // the whole declaration moves
+					addMovingRange(decl, token.ILLEGAL) // the whole declaration moves
 				} else {
 					for _, spec := range movingSpecs {
-						addMovingRange(spec, decl)
+						addMovingRange(spec, decl.Tok)
 					}
 				}
 			}
@@ -888,8 +916,8 @@ func updateSrcDestImports(srcPkg, destPkg *cache.Package, destPGF *parsego.File,
 }
 
 // addImport wraps [refactor.AddImport] and converts the resulting edits to [protocol.TextEdit]s.
-func addImport(info *types.Info, pgf *parsego.File, preferredName, pkgPath, member string, pos token.Pos) (string, []protocol.TextEdit, error) {
-	prefix, impEdits := refactor.AddImport(info, pgf.File, preferredName, pkgPath, member, pos)
+func addImport(info *types.Info, pgf *parsego.File, preferredName, pkgPath, member string, poses ...token.Pos) (string, []protocol.TextEdit, error) {
+	prefix, impEdits := refactor.AddImport(info, pgf.File, preferredName, pkgPath, member, poses...)
 	pedits, err := pgf.ProtocolTextEdits(impEdits)
 	if err != nil {
 		return "", nil, err
@@ -1007,32 +1035,31 @@ func updateSrcFileRefs(info *types.Info, pgf *parsego.File, destPkgName, destPkg
 		return false
 	}
 
-	var (
-		edits           []protocol.TextEdit
-		addedDestImport bool
-		destPrefix      string
-	)
+	var positions []token.Pos // start poses of identifiers, re"()Foo"
 	for cur := range pgf.Cursor().Preorder((*ast.Ident)(nil)) {
 		id := cur.Node().(*ast.Ident)
 		if inSkipRanges(id.Pos()) || !isMovingObj(info.Uses[id]) {
 			continue
 		}
-		if !addedDestImport {
-			prefix, impEdits, err := addImport(info, pgf, destPkgName, destPkgPath, id.Name, id.Pos())
-			if err != nil {
-				return nil, err
-			}
-			edits = append(edits, impEdits...)
-			addedDestImport = true
-			destPrefix = prefix
-		}
-		idRng, err := pgf.NodeRange(id)
+		positions = append(positions, id.Pos())
+	}
+	if len(positions) == 0 { // no reference of moved symbols
+		return nil, nil
+	}
+
+	prefix, edits, err := addImport(info, pgf, destPkgName, destPkgPath, "", positions...)
+	if err != nil {
+		return nil, err
+	}
+	// Insert prefix "dest." in front of the moved idents. Foo -> dest.Foo
+	for _, pos := range positions {
+		rng, err := pgf.PosRange(pos, pos)
 		if err != nil {
 			return nil, err
 		}
 		edits = append(edits, protocol.TextEdit{
-			Range:   idRng,
-			NewText: destPrefix + id.Name,
+			Range:   rng,
+			NewText: prefix,
 		})
 	}
 	return edits, nil
@@ -1046,82 +1073,79 @@ func updateSrcFileRefs(info *types.Info, pgf *parsego.File, destPkgName, destPkg
 //
 // If all uses of srcPkg in pgf are removed by this transformation, the unused
 // srcPkg import is also deleted.
+//
 // TODO(mkalil): This doesn't handle references via dot imports. But they are rare. Maybe
 // we should just reject if the srcPkg is dot-imported?
 func updatePkgQualifiedRefs(info *types.Info, pgf *parsego.File, srcPkgPath, destPkgName, destPkgPath string, isDestPkg bool, isMovingObj func(types.Object) bool,
 ) ([]protocol.TextEdit, error) {
-	// Count total uses of srcPkg's PkgName(s) in pgf so we can detect if its
-	// import becomes unused after rewriting references to moving symbols.
+	// Count remaining uses of srcPkg's PkgName(s) in pgf so we can detect if
+	// its import becomes unused after rewriting references to moving symbols.
 	//
 	// Uses are counted per PkgName (i.e. per import spec) rather than with a
 	// single counter because pgf may import srcPkg more than once under different
 	// names. Each import spec can only be deleted if all of its own uses are
 	// removed.
-	totalPkgUses := make(map[*types.PkgName]int)
-	for cur := range pgf.Cursor().Preorder((*ast.Ident)(nil)) {
-		id := cur.Node().(*ast.Ident)
-		if pkgName, ok := info.Uses[id].(*types.PkgName); ok && pkgName.Imported().Path() == srcPkgPath {
-			totalPkgUses[pkgName]++
-		}
-	}
-
 	var (
-		edits          []protocol.TextEdit
-		removedPkgUses = make(map[*types.PkgName]int)
-		addedImport    bool
-		destPrefix     string
+		starts           []token.Pos // start poses of the qualifier, re"()src."
+		ends             []token.Pos // end poses of the qualifier, re"src.()"
+		remainingPkgUses = make(map[*types.PkgName]int)
 	)
 	for cur := range pgf.Cursor().Preorder((*ast.SelectorExpr)(nil)) {
 		sel := cur.Node().(*ast.SelectorExpr)
-		if !isMovingObj(info.Uses[sel.Sel]) {
-			continue
-		}
-		xId, ok := sel.X.(*ast.Ident)
+		xID, ok := sel.X.(*ast.Ident)
 		if !ok {
 			continue
 		}
-		pkgName, ok := info.Uses[xId].(*types.PkgName)
+		pkgName, ok := info.Uses[xID].(*types.PkgName)
 		if !ok || pkgName.Imported().Path() != srcPkgPath {
 			continue
 		}
-		removedPkgUses[pkgName]++
 
-		rng, err := pgf.NodeRange(sel) // replace the range of the entire selector (src.Foo) with either Foo or dest.Foo
+		if isMovingObj(info.Uses[sel.Sel]) {
+			starts = append(starts, sel.Pos())
+			ends = append(ends, sel.Sel.Pos())
+		} else {
+			remainingPkgUses[pkgName]++
+		}
+	}
+	if len(starts) == 0 {
+		return nil, nil // no moving references in this file; nothing to rewrite or delete
+	}
+
+	var (
+		edits  []protocol.TextEdit
+		prefix string
+	)
+	if isDestPkg { // Inside destPkg: drop the package qualifier (src.Foo -> Foo).
+		prefix = ""
+	} else { // In an external package: rewrite qualifier (src.Foo -> dest.Foo) and add import of destPkg.
+		destPrefix, impEdits, err := addImport(info, pgf, destPkgName, destPkgPath, "", starts...)
 		if err != nil {
 			return nil, err
 		}
-
-		if isDestPkg {
-			// Inside destPkg: drop the package qualifier (src.Foo -> Foo).
-			edits = append(edits, protocol.TextEdit{
-				Range:   rng,
-				NewText: sel.Sel.Name,
-			})
-		} else {
-			// In a non-destPkg package: rewrite qualifier (src.Foo -> dest.Foo)
-			// and add an import of destPkg.
-			if !addedImport {
-				var impEdits []protocol.TextEdit
-				destPrefix, impEdits, err = addImport(info, pgf, destPkgName, destPkgPath, sel.Sel.Name, sel.Pos())
-				if err != nil {
-					return nil, err
-				}
-				edits = append(edits, impEdits...)
-				addedImport = true
-			}
-			edits = append(edits, protocol.TextEdit{
-				Range:   rng,
-				NewText: destPrefix + sel.Sel.Name,
-			})
-		}
+		prefix = destPrefix
+		edits = append(edits, impEdits...)
 	}
 
-	// If srcPkg has no remaining uses in pgf, remove its import spec.
+	// Replace the package qualifier span [start, end) (e.g. "src.") with
+	// prefix (e.g. "dest." in external packages, or "" inside destPkg).
+	for i := range starts {
+		rng, err := pgf.PosRange(starts[i], ends[i])
+		if err != nil {
+			return nil, err
+		}
+		edits = append(edits, protocol.TextEdit{
+			Range:   rng,
+			NewText: prefix,
+		})
+	}
+
+	// If an import of srcPkg has no remaining uses in pgf, remove its spec.
 	var unusedSpecs []*ast.ImportSpec
 	for _, spec := range pgf.File.Imports {
 		if pkgName := info.PkgNameOf(spec); pkgName != nil &&
-			removedPkgUses[pkgName] > 0 &&
-			removedPkgUses[pkgName] == totalPkgUses[pkgName] {
+			pkgName.Imported().Path() == srcPkgPath &&
+			remainingPkgUses[pkgName] == 0 {
 			unusedSpecs = append(unusedSpecs, spec)
 		}
 	}
