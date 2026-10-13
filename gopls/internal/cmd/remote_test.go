@@ -12,11 +12,13 @@ package cmd_test
 // (including ENTRYPOINT) to the daemon that it starts.
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"text/template"
 )
 
 const remoteFiles = `
@@ -30,6 +32,13 @@ package a
 const Hello = "hello"
 
 var _ = Hello
+
+-- a_test.go --
+package a
+
+import "testing"
+
+func TestFoo(t *testing.T) {}
 `
 
 // TestRemoteAuto tests that -remote=auto starts a daemon if none is running,
@@ -170,6 +179,118 @@ func TestRemoteExplicitAddress(t *testing.T) {
 	res.checkExit(false)
 	res.checkStderr("failed to dial remote")
 	checkEmptyDir(t, dir) // no daemon bound the socket
+}
+
+// TestRemoteAutoEnvParity tests that environment variables set on the client
+// (such as GOARCH) are honored by a daemon started by a client with a
+// different environment.
+func TestRemoteAutoEnvParity(t *testing.T) {
+	t.Parallel()
+	needsAutoRemote(t)
+
+	altArch := "arm64"
+	if runtime.GOARCH == "arm64" {
+		altArch = "amd64"
+	}
+
+	const treeTmpl = `
+-- go.mod --
+module example.com
+go 1.18
+
+-- arch_{{.HostArch}}.go --
+//go:build {{.HostArch}}
+
+package a
+
+const Arch = "{{.HostArch}}"
+
+-- arch_{{.AltArch}}.go --
+//go:build {{.AltArch}}
+
+package a
+
+const Arch = "{{.AltArch}}"
+
+-- a.go --
+package a
+
+var _ = Arch
+`
+	tmpl := template.Must(template.New("tree").Parse(treeTmpl))
+	var buf strings.Builder
+	if err := tmpl.Execute(&buf, map[string]string{
+		"HostArch": runtime.GOARCH,
+		"AltArch":  altArch,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tree := writeTree(t, buf.String())
+
+	xdg := runtimeDir(t)
+	baseEnv := []string{"XDG_RUNTIME_DIR=" + xdg}
+	remote := []string{"-remote=auto;envparity", "-remote.listen.timeout=" + listenTimeout}
+
+	// First command starts the daemon using the host's default GOARCH.
+	{
+		res := goplsWithEnv(t, tree, baseEnv, append(remote, "definition", "a.go:3:9")...)
+		res.checkExit(true)
+		res.checkStdout(fmt.Sprintf(`arch_%s\.go:5:7-11: defined here as const Arch`, runtime.GOARCH))
+	}
+
+	// Second command reuses the running daemon, but sets GOARCH to altArch in
+	// its environment. The daemon must evaluate the query using the client's
+	// GOARCH, not the daemon's host GOARCH.
+	{
+		clientEnv := append([]string{"GOARCH=" + altArch}, baseEnv...)
+		res := goplsWithEnv(t, tree, clientEnv, append(remote, "definition", "a.go:3:9")...)
+		res.checkExit(true)
+		res.checkStdout(fmt.Sprintf(`arch_%s\.go:5:7-11: defined here as const Arch`, altArch))
+	}
+}
+
+// TestRemoteAutoOptionsParity tests that client configuration options
+// (such as symbol matcher and codelenses["test"]) are propagated to the
+// daemon and honored across requests.
+func TestRemoteAutoOptionsParity(t *testing.T) {
+	t.Parallel()
+	needsAutoRemote(t)
+
+	tree := writeTree(t, remoteFiles)
+	xdg := runtimeDir(t)
+	baseEnv := []string{"XDG_RUNTIME_DIR=" + xdg}
+	remote := []string{"-remote=auto;optparity", "-remote.listen.timeout=" + listenTimeout}
+
+	// 1. workspace_symbol matcher parity:
+	// A CaseSensitive query for lowercase "hello" must not match "Hello",
+	// while a query for "Hello" must match.
+	{
+		res := goplsWithEnv(t, tree, baseEnv, append(remote, "workspace_symbol", "-matcher=CaseSensitive", "hello")...)
+		res.checkExit(true)
+		if strings.Contains(res.stdout, "Hello") {
+			t.Errorf("workspace_symbol -matcher=CaseSensitive found Hello for 'hello': %s", res.stdout)
+		}
+	}
+	{
+		res := goplsWithEnv(t, tree, baseEnv, append(remote, "workspace_symbol", "-matcher=CaseSensitive", "Hello")...)
+		res.checkExit(true)
+		res.checkStdout(`a\.go:3:7-12 Hello Constant`)
+	}
+
+	// 2. codelens parity:
+	// 'codelens' overrides the default for codelenses["test"] (off by default)
+	// to true. The daemon must receive this setting and return the test lens.
+	{
+		want := gopls(t, tree, "codelens", "a_test.go")
+		want.checkExit(true)
+		want.checkStdout("run test")
+
+		res := goplsWithEnv(t, tree, baseEnv, append(remote, "codelens", "a_test.go")...)
+		res.checkExit(true)
+		if res.stdout != want.stdout {
+			t.Errorf("codelens -remote stdout = <<%s>>, want <<%s>>", res.stdout, want.stdout)
+		}
+	}
 }
 
 // listenTimeout is the -remote.listen.timeout of the daemons started by these
