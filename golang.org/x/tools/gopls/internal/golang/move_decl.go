@@ -135,6 +135,11 @@ func MoveDeclaration(ctx context.Context, snapshot *cache.Snapshot, srcFH file.H
 			dest.pkgPath, dest.pkgName = dest.pkg.Metadata().PkgPath, dest.pkg.Metadata().Name
 		} else if dest.pkgPath, dest.pkgName, err = newPackage(srcMod, destURI); err != nil { // create package if it doesn't exist
 			return nil, protocol.Location{}, err
+		} else if dest.pkgPath == srcPkg.Metadata().PkgPath {
+			// The destination directory has no non-test package, but it is the
+			// source package's own directory (e.g. a directory containing only
+			// _test.go files). This is a same-package move.
+			dest.pkg, dest.pkgName = srcPkg, srcPkg.Metadata().Name
 		}
 	}
 
@@ -333,9 +338,9 @@ func inVendorDir(mod *packages.Module, destURI protocol.DocumentURI) bool {
 
 // moveDeclTarget returns the cursor of the declaration to be moved, based on
 // curSel. The moving declaration is the innermost TypeSpec, ValueSpec, or
-// FuncDecl enclosing curSel, if any. It must be a package-level decl. If the
-// cursor is within a multi-value ValueSpec, we return the first enclosing
-// identifier, if any. It also returns the corresponding name and types.Object.
+// FuncDecl enclosing curSel, if any. It must be a package-level decl, and a
+// ValueSpec must declare a single name. It also returns the corresponding name
+// and types.Object.
 func moveDeclTarget(info *types.Info, curSel inspector.Cursor) (inspector.Cursor, string, types.Object) {
 	if cur, ok := moreiters.First(curSel.Enclosing(
 		(*ast.FuncDecl)(nil), (*ast.TypeSpec)(nil), (*ast.ValueSpec)(nil))); ok {
@@ -352,32 +357,12 @@ func moveDeclTarget(info *types.Info, curSel inspector.Cursor) (inspector.Cursor
 				}
 			}
 		case *ast.ValueSpec:
-			// Only support moving package-level decls.
-			if cur.Parent().ParentEdgeKind() == edge.File_Decls {
-				if len(n.Values) > 0 && len(n.Values) != len(n.Names) {
-					// Don't allow moving an ident in a multi-assignment with one value,
-					// e.g. x, y := f(). The RHS may have side effects, and when moving
-					// the variable it will change the number of calls.
-					// (This pattern can also occur with indexing a map, type assertions,
-					// and channels. We should also not support these types of moves)
-					return inspector.Cursor{}, "", nil
-				}
-				if len(n.Names) == 1 {
-					id := n.Names[0]
-					if obj := info.Defs[id]; obj != nil {
-						return cur, n.Names[0].Name, obj
-					}
-				} else {
-					// For a multi-value ValueSpec, only match if the cursor is directly
-					// on one of the declared names (not in the type or value expressions).
-					// var a, b = foo, bar <- cursor in foo/bar is ambiguous
-					// var a, b MyType <- cursor in MyType is ambiguous
-					if curSel.ParentEdgeKind() == edge.ValueSpec_Names {
-						id := curSel.Node().(*ast.Ident)
-						if obj := info.Defs[id]; obj != nil {
-							return cur, id.Name, obj
-						}
-					}
+			// Only support moving package-level decls that declare a single
+			// name. Moving one name of a multi-name spec (e.g. "var a, b = 1, 2"
+			// or "var x, y = f()") is not supported.
+			if cur.Parent().ParentEdgeKind() == edge.File_Decls && len(n.Names) == 1 {
+				if obj := info.Defs[n.Names[0]]; obj != nil {
+					return cur, n.Names[0].Name, obj
 				}
 			}
 		}
@@ -672,6 +657,12 @@ func usesIota(info *types.Info, decl *ast.GenDecl) ([]types.Object, bool) {
 // For each of these symbols, we also include their coupled symbols, recursively.
 // For each symbol's dependencies (as specified by edges in the declGraph), we add
 // the symbol to the moving set.
+//
+// TODO(mkalil): handle same-package moves between test and non-test files. A
+// package and its test variant are distinct *cache.Packages with the same path,
+// so the srcPkg == destPkg check below treats them as different packages.
+// (Currently, dialog_move_decl_tests.txt lacks complete tests for moves
+// involving internal test files).
 func computeMovingSet(srcPkg, destPkg *cache.Package, graph *declGraph, targetObj types.Object) map[types.Object]bool {
 	visited := map[types.Object]bool{targetObj: true}
 	if srcPkg == destPkg {
@@ -945,7 +936,15 @@ func extractMovingDeclarations(srcPkg *cache.Package, moving map[types.Object]bo
 							movingSpecs = append(movingSpecs, spec)
 						}
 					case *ast.ValueSpec:
-						if slices.ContainsFunc(spec.Names, isMoving) {
+						// Moving only some of the names in a spec, as in moving
+						// "a" from "var a, b = 1, 2", is not supported.
+						if i := slices.IndexFunc(spec.Names, isMoving); i >= 0 {
+							if j := slices.IndexFunc(spec.Names, func(id *ast.Ident) bool {
+								return id.Name != "_" && !isMoving(id)
+							}); j >= 0 {
+								return nil, fmt.Errorf("cannot move %s: it is declared together with %s, which is not moving",
+									spec.Names[i].Name, spec.Names[j].Name)
+							}
 							movingSpecs = append(movingSpecs, spec)
 						}
 					}
